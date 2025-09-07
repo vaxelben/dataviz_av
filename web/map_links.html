@@ -22,6 +22,8 @@
     .btn-drag{ position:absolute; top:12px; left:56px; width:36px; height:36px; display:grid; place-items:center; border:1px solid var(--border); background:#0b1220aa; color:var(--text); border-radius:8px; cursor:pointer; z-index:5; }
     .btn-drag:hover{ background:#111827; }
     .btn-drag.is-on{ outline:2px solid #22c55e; }
+    .btn-proj{ position:absolute; top:12px; left:100px; min-width:78px; height:36px; display:grid; place-items:center; padding:0 10px; border:1px solid var(--border); background:#0b1220aa; color:var(--text); border-radius:8px; cursor:pointer; z-index:5; }
+    .btn-proj:hover{ background:#111827; }
     label{display:block;margin-bottom:8px;color:var(--muted);font-size:13px}
     select,input{width:100%;padding:8px 10px;background:#0f172a;border:1px solid var(--border);border-radius:8px;color:var(--text)}
     .tooltip{position:fixed;pointer-events:none;background:#111827;border:1px solid var(--border);padding:8px 10px;border-radius:8px;font-size:12px;color:var(--text);display:none}
@@ -40,6 +42,7 @@
         <div id="map">
           <button id="resetView" class="btn-reset" title="Réinitialiser la vue" aria-label="Réinitialiser la vue">⟲</button>
           <button id="toggleDrag" class="btn-drag" title="Activer/Désactiver le déplacement" aria-label="Activer/Désactiver le déplacement">✥</button>
+          <button id="toggleProjection" class="btn-proj" title="Basculer projection" aria-label="Basculer projection">GLOBE</button>
         </div>
       </div>
       <div class="panel" id="filterPanel" style="display:flex;flex-direction:column;gap:12px;overflow:auto">
@@ -70,8 +73,15 @@
     const width = 980, height = 540;
     const svg = d3.select('#map').append('svg').attr('viewBox', `0 0 ${width} ${height}`).style('width','100%').style('height','100%');
     const g = svg.append('g');
-    const projection = d3.geoNaturalEarth1().scale(165).translate([width/2, height/2]);
-    const path = d3.geoPath(projection);
+    let projectionMode = 'globe';
+    const baseScaleGlobe = 240;
+    const baseScaleMap = 165;
+    let currentZoomK = 1;
+    let projection = d3.geoOrthographic().scale(baseScaleGlobe).translate([width/2, height/2]).clipAngle(90);
+    let path = d3.geoPath(projection);
+    let blendProjectFn = null; // fonction de projection interpolée pendant le morphing
+    let blendT = 0;            // progression du morphing [0..1]
+    let worldGeo = null;       // géo conservée pour morphing
 
     function normalizeName(s){
       if(!s) return null;
@@ -102,7 +112,11 @@
     const srcSelect = document.getElementById('srcCountries');
     const videoList = document.getElementById('videoList');
     const toggleModeBtn = document.getElementById('toggleMode');
+    const toggleProjectionBtn = document.getElementById('toggleProjection');
     let mode = 'off'; // 'off' = domestique (src=dst), 'on' = international (src!=dst)
+    let lastFlows = [];
+    let zoomBehavior = null;
+    let dragBehavior = null;
 
     async function fetchFlows(){
       const qs = new URLSearchParams();
@@ -140,24 +154,51 @@
       'france': [2.2137, 46.2276],
     };
 
-    function countryCentroid(geo, name){
+    function countryLonLat(geo, name){
       const key = normalizeName(name);
-      if (key && anchorOverrides[key]) {
-        const p = projection(anchorOverrides[key]);
-        return p;
-      }
+      if (key && anchorOverrides[key]) return anchorOverrides[key];
       for(const f of geo.features){
         const nm = normalizeName(f.properties && f.properties.name);
         if(nm === key){
-          return path.centroid(f);
+          const c = d3.geoCentroid(f);
+          return c; // [lon, lat]
         }
       }
       return null;
     }
 
+    function isVisibleLonLat(lonlat){
+      if(!lonlat) return false;
+      if (projectionMode === 'map' || projectionMode === 'blend') return true;
+      const rot = d3.geoRotation(projection.rotate());
+      const p = rot(lonlat);
+      return d3.geoDistance([0,0], p) <= Math.PI/2 - 1e-6;
+    }
+
+    function countryCentroid(geo, name){
+      const ll = countryLonLat(geo, name);
+      if(!ll || !isVisibleLonLat(ll)) return null;
+      if (projectionMode === 'blend' && typeof blendProjectFn === 'function') return blendProjectFn(ll);
+      return projection(ll);
+    }
+
     function render(geo, flows){
 
       g.selectAll('*').remove();
+      // Sphère (océan) et graticule (visible dans les deux modes)
+      g.append('path')
+        .datum({type:'Sphere'})
+        .attr('fill', '#0b1220')
+        .attr('stroke', '#1f2937')
+        .attr('stroke-width', .8)
+        .attr('d', path);
+      g.append('path')
+        .datum(d3.geoGraticule10())
+        .attr('fill', 'none')
+        .attr('stroke', '#1f2937')
+        .attr('stroke-opacity', 0.6)
+        .attr('stroke-width', .5)
+        .attr('d', path);
       g.selectAll('path.country').data(geo.features).join('path')
         .attr('class', 'country')
         .attr('d', path)
@@ -171,10 +212,10 @@
       const opacity = d3.scaleSqrt().domain([1, maxCount]).range([0.25, 0.95]);
 
       const arcs = flows.map(d => {
-        const a = countryCentroid(geo, d.src);
-        const b = countryCentroid(geo, d.dst);
-        if(!a || !b) return null;
-        return { a, b, count: d.count, views: d.views, src: d.src, dst: d.dst };
+        const srcLL = countryLonLat(geo, d.src);
+        const dstLL = countryLonLat(geo, d.dst);
+        if(!srcLL || !dstLL) return null;
+        return { srcLL, dstLL, count: d.count, views: d.views, src: d.src, dst: d.dst };
       }).filter(Boolean);
 
       // Dessiner des courbes quadratiques simples
@@ -193,18 +234,29 @@
         .attr('stroke-opacity', d => opacity(d.count||0))
         .attr('stroke-width', d => stroke(d.count||0))
         .attr('d', d => {
-          const [x1,y1] = d.a, [x2,y2] = d.b;
-          const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
-          const dx = x2 - x1, dy = y2 - y1;
-          const norm = Math.sqrt(dx*dx + dy*dy) || 1;
-          const base = Math.min(80, norm * 0.3);
-          const horiz = Math.abs(dx) / norm;
-          const off = base * horiz;
-          let px = -dy / norm, py = dx / norm; // perpendiculaire +90°
-          if (py > 0) { px = -px; py = -py; } // garantir une composante y négative (vers le haut)
-          const cx = mx + px * off;
-          const cy = my + py * off;
-          return `M${x1},${y1} Q${cx},${cy} ${x2},${y2}`;
+          if (projectionMode === 'globe'){
+            const interpolate = d3.geoInterpolate(d.srcLL, d.dstLL);
+            const dist = d3.geoDistance(d.srcLL, d.dstLL);
+            const steps = Math.max(8, Math.ceil(dist * 32));
+            const coords = d3.range(steps + 1).map(t => interpolate(t/steps));
+            const line = { type:'LineString', coordinates: coords };
+            return path(line) || null;
+          } else {
+            const a = projection(d.srcLL);
+            const b = projection(d.dstLL);
+            const [x1,y1] = a, [x2,y2] = b;
+            const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+            const dx = x2 - x1, dy = y2 - y1;
+            const norm = Math.sqrt(dx*dx + dy*dy) || 1;
+            const base = Math.min(80, norm * 0.3);
+            const horiz = Math.abs(dx) / norm;
+            const off = base * horiz;
+            let px = -dy / norm, py = dx / norm; // perpendiculaire +90°
+            if (py > 0) { px = -px; py = -py; } // garantir une composante y négative (vers le haut)
+            const cx = mx + px * off;
+            const cy = my + py * off;
+            return `M${x1},${y1} Q${cx},${cy} ${x2},${y2}`;
+          }
         })
         .on('mouseenter', (ev, d) => {
           const key = normalizeName(d.dst);
@@ -224,8 +276,9 @@
       const maxSelf = d3.max(selfFlows, d => d.count || 0) || 1;
       const rSelf = d3.scaleSqrt().domain([1, maxSelf]).range([3, 16]);
       const points = selfFlows.map(d => {
-        const c = countryCentroid(geo, d.dst);
-        if(!c) return null;
+        const ll = countryLonLat(geo, d.dst);
+        if(!ll || !isVisibleLonLat(ll)) return null;
+        const c = projection(ll);
         return { x:c[0], y:c[1], country:d.dst, count:d.count };
       }).filter(Boolean);
 
@@ -248,11 +301,123 @@
         .on('mouseleave', ()=>{ tip.style.display = 'none'; setHighlight(null); });
     }
 
+    // Rendu statique dans un calque dédié, pour crossfade (sans interactions)
+    function renderSnapshot(geo, flows, mode, targetG){
+      targetG.selectAll('*').remove();
+      // config locale de projection
+      const proj = (mode === 'globe')
+        ? d3.geoOrthographic().scale(baseScaleGlobe * currentZoomK).translate([width/2, height/2]).clipAngle(90).rotate(projection.rotate())
+        : d3.geoNaturalEarth1().scale(baseScaleMap).translate([width/2, height/2]);
+      const pth = d3.geoPath(proj);
+
+      const localIsVisible = (lonlat) => {
+        if(!lonlat) return false;
+        if (mode === 'map') return true;
+        const rot = d3.geoRotation(proj.rotate());
+        const pp = rot(lonlat);
+        return d3.geoDistance([0,0], pp) <= Math.PI/2 - 1e-6;
+      };
+
+      const countryLL = (name) => {
+        const key = normalizeName(name);
+        if (key && anchorOverrides[key]) return anchorOverrides[key];
+        for(const f of geo.features){
+          const nm = normalizeName(f.properties && f.properties.name);
+          if(nm === key){ return d3.geoCentroid(f); }
+        }
+        return null;
+      };
+
+      targetG.append('path')
+        .datum({type:'Sphere'})
+        .attr('fill', '#0b1220')
+        .attr('stroke', '#1f2937')
+        .attr('stroke-width', .8)
+        .attr('d', pth);
+      targetG.append('path')
+        .datum(d3.geoGraticule10())
+        .attr('fill', 'none')
+        .attr('stroke', '#1f2937')
+        .attr('stroke-opacity', 0.6)
+        .attr('stroke-width', .5)
+        .attr('d', pth);
+      targetG.selectAll('path.country').data(geo.features).join('path')
+        .attr('class', 'country')
+        .attr('d', pth)
+        .attr('data-key', d => normalizeName(d.properties && d.properties.name) || '')
+        .attr('fill', '#0b1220')
+        .attr('stroke', '#1f2937').attr('stroke-width', .6);
+
+      const maxCount = d3.max(flows, d => d.count || 0) || 1;
+      const stroke = d3.scaleSqrt().domain([1, maxCount]).range([0.5, 0.5]);
+      const opacity = d3.scaleSqrt().domain([1, maxCount]).range([0.25, 0.95]);
+
+      const arcs = flows.map(d => {
+        const srcLL = countryLL(d.src);
+        const dstLL = countryLL(d.dst);
+        if(!srcLL || !dstLL) return null;
+        return { srcLL, dstLL, count: d.count, views: d.views, src: d.src, dst: d.dst };
+      }).filter(Boolean);
+
+      targetG.selectAll('path.flow').data(arcs).join('path')
+        .attr('class', 'flow')
+        .attr('fill', 'none')
+        .attr('stroke', '#22c55e')
+        .attr('stroke-opacity', d => opacity(d.count||0))
+        .attr('stroke-width', d => stroke(d.count||0))
+        .attr('d', d => {
+          if (mode === 'globe'){
+            const interpolate = d3.geoInterpolate(d.srcLL, d.dstLL);
+            const dist = d3.geoDistance(d.srcLL, d.dstLL);
+            const steps = Math.max(8, Math.ceil(dist * 32));
+            const coords = d3.range(steps + 1).map(t => interpolate(t/steps));
+            const line = { type:'LineString', coordinates: coords };
+            return pth(line) || null;
+          } else {
+            const a = proj(d.srcLL);
+            const b = proj(d.dstLL);
+            const [x1,y1] = a, [x2,y2] = b;
+            const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+            const dx = x2 - x1, dy = y2 - y1;
+            const norm = Math.sqrt(dx*dx + dy*dy) || 1;
+            const base = Math.min(80, norm * 0.3);
+            const horiz = Math.abs(dx) / norm;
+            const off = base * horiz;
+            let px = -dy / norm, py = dx / norm;
+            if (py > 0) { px = -px; py = -py; }
+            const cx = mx + px * off;
+            const cy = my + py * off;
+            return `M${x1},${y1} Q${cx},${cy} ${x2},${y2}`;
+          }
+        });
+
+      const selfFlows = flows.filter(d => normalizeName(d.src) === normalizeName(d.dst));
+      const maxSelf = d3.max(selfFlows, d => d.count || 0) || 1;
+      const rSelf = d3.scaleSqrt().domain([1, maxSelf]).range([3, 16]);
+      const points = selfFlows.map(d => {
+        const ll = countryLL(d.dst);
+        if(!ll || !localIsVisible(ll)) return null;
+        const c = proj(ll);
+        return { x:c[0], y:c[1], country:d.dst, count:d.count };
+      }).filter(Boolean);
+
+      targetG.selectAll('circle.self-flow').data(points).join('circle')
+        .attr('class', 'self-flow')
+        .attr('cx', d => d.x)
+        .attr('cy', d => d.y)
+        .attr('r', d => rSelf(d.count||0))
+        .attr('fill', '#22c55e')
+        .attr('fill-opacity', 0.28)
+        .attr('stroke', '#22c55e')
+        .attr('stroke-width', 1);
+    }
+
     async function init(){
       const [geo, dateList] = await Promise.all([
         loadWorld(),
         fetch(`/api/meta/dates`).then(r=>r.json()).catch(()=>({dates:[]}))
       ]);
+      worldGeo = geo;
       dates = (dateList && Array.isArray(dateList.dates)) ? dateList.dates : [];
       dateSlider.min = 0; dateSlider.max = Math.max(0, dates.length-1); dateSlider.value = Math.max(0, dates.length-1);
       dateLabel.textContent = dates.length ? dates[+dateSlider.value] : '—';
@@ -267,6 +432,7 @@
       const franceOpt = Array.from(srcSelect.options).find(o => (o.value||'').toLowerCase() === 'france');
       if(franceOpt){ srcSelect.value = franceOpt.value; }
       const [flows, vids] = await Promise.all([fetchFlows(), fetchVideos()]);
+      lastFlows = flows;
       render(geo, flows);
       const fmt0 = d3.format(',');
       videoList.replaceChildren(...(vids.map(v => {
@@ -286,20 +452,61 @@
         return row;
       })));
 
-      // Zoom & pan (roulette + drag)
+      // Zoom & drag dépendants de la projection
       let dragEnabled = false;
-      const zoom = d3.zoom()
-        .scaleExtent([0.7, 12])
-        .filter((event) => {
-          // roulette de souris toujours active; drag seulement si activé
-          if (event.type === 'wheel') return true;
-          if (event.type === 'mousedown') return dragEnabled && event.button === 0;
-          return false;
-        })
-        .on('start', () => { if (dragEnabled) svg.style('cursor','grabbing'); })
-        .on('end',   () => { svg.style('cursor', dragEnabled ? 'grab' : 'default'); })
-        .on('zoom', (ev) => { g.attr('transform', ev.transform); });
-      svg.call(zoom).on('dblclick.zoom', null);
+      function setupInteractions(){
+        // nettoyer anciens handlers
+        svg.on('.zoom', null).on('.drag', null);
+        if (projectionMode === 'globe'){
+          // reset transform
+          g.attr('transform', null);
+          currentZoomK = Math.max(0.7, Math.min(12, currentZoomK));
+          projection.scale(baseScaleGlobe * currentZoomK);
+          zoomBehavior = d3.zoom()
+            .scaleExtent([0.7, 12])
+            .filter((event) => event.type === 'wheel')
+            .on('zoom', (ev) => {
+              currentZoomK = ev.transform.k;
+              projection.scale(baseScaleGlobe * currentZoomK);
+              render(geo, lastFlows);
+            });
+          svg.call(zoomBehavior).on('dblclick.zoom', null);
+
+          dragBehavior = d3.drag()
+            .filter((event) => dragEnabled && event.button === 0)
+            .on('start', (ev) => {
+              svg.style('cursor','grabbing');
+              dragBehavior.__start = { x: ev.x, y: ev.y, r: projection.rotate() };
+            })
+            .on('drag', (ev) => {
+              const s = dragBehavior.__start || { x: ev.x, y: ev.y, r: projection.rotate() };
+              const dx = ev.x - s.x;
+              const dy = ev.y - s.y;
+              const sens = 0.25; // degrés par pixel
+              const r0 = s.r || [0,0,0];
+              const r = [ r0[0] + dx * sens, r0[1] - dy * sens, r0[2] || 0 ];
+              projection.rotate(r);
+              render(geo, lastFlows);
+            })
+            .on('end', () => { svg.style('cursor', dragEnabled ? 'grab' : 'default'); });
+          svg.call(dragBehavior);
+        } else {
+          // mode carte: zoom/pan via transform, projection à l'échelle base
+          projection = d3.geoNaturalEarth1().scale(baseScaleMap).translate([width/2, height/2]);
+          path = d3.geoPath(projection);
+          zoomBehavior = d3.zoom()
+            .scaleExtent([0.7, 12])
+            .filter((event) => {
+              if (event.type === 'wheel') return true;
+              if (event.type === 'mousedown') return dragEnabled && event.button === 0;
+              return false;
+            })
+            .on('start', () => { if (dragEnabled) svg.style('cursor','grabbing'); })
+            .on('end',   () => { svg.style('cursor', dragEnabled ? 'grab' : 'default'); })
+            .on('zoom', (ev) => { g.attr('transform', ev.transform); });
+          svg.call(zoomBehavior).on('dblclick.zoom', null);
+        }
+      }
 
       // Bouton de réinitialisation de la vue
       const btnReset = document.getElementById('resetView');
@@ -318,8 +525,147 @@
         updateDragUI();
       });
 
+      function setProjectionMode(mode){
+        const prevMode = projectionMode;
+        const prevRotate = (typeof projection.rotate === 'function') ? projection.rotate() : [0,0,0];
+        // Morphing réel des chemins entre prevMode -> mode
+        morphProjection(prevMode, mode, prevRotate);
+      }
+
+      function morphProjection(prevMode, targetMode, prevRotate){
+        // désactiver interactions pendant morph
+        svg.on('.zoom', null).on('.drag', null);
+
+        // Capturer le transform actuel avant de le modifier
+        const currentTransform = d3.zoomTransform(svg.node());
+
+        // Créer les projections source et cible avec gestion cohérente des échelles
+        let proj0, proj1;
+        
+        if (prevMode === 'globe') {
+          proj0 = d3.geoOrthographic().scale(baseScaleGlobe * currentZoomK).translate([width/2, height/2]).clipAngle(90).rotate(prevRotate);
+        } else {
+          // En mode carte, créer une projection qui reflète l'état visuel actuel
+          const yaw = (Array.isArray(prevRotate) ? prevRotate[0] : 0) || 0;
+          proj0 = d3.geoNaturalEarth1().scale(baseScaleMap * currentTransform.k).translate([
+            width/2 + currentTransform.x, 
+            height/2 + currentTransform.y
+          ]).rotate([yaw, 0, 0]);
+        }
+          
+        if (targetMode === 'globe') {
+          proj1 = d3.geoOrthographic().scale(baseScaleGlobe * currentZoomK).translate([width/2, height/2]).clipAngle(90).rotate(prevRotate);
+        } else {
+          const yaw = (Array.isArray(prevRotate) ? prevRotate[0] : 0) || 0;
+          proj1 = d3.geoNaturalEarth1().scale(baseScaleMap).translate([width/2, height/2]).rotate([yaw, 0, 0]);
+        }
+
+        projectionMode = 'blend';
+        const dur = 1200;
+
+        // Supprimer le transform immédiatement pour éviter les conflits
+        g.attr('transform', null);
+
+        // Créer une transition unique et cohérente pour tous les éléments
+        const transition = g.transition().duration(dur).ease(d3.easeQuadInOut);
+
+        // Méthode standard D3 (ObservableHQ) : interpolation point par point entre projections
+        const createPathTween = (geom) => {
+          return (t) => {
+            const interpolatedProj = d3.geoProjection((lambda, phi) => {
+              const lonlat = [lambda * 180 / Math.PI, phi * 180 / Math.PI];
+              const p0 = proj0(lonlat);
+              const p1 = proj1(lonlat);
+              if (!p0 || !p1) return null;
+              return [
+                p0[0] + t * (p1[0] - p0[0]), 
+                p0[1] + t * (p1[1] - p0[1])
+              ];
+            }).scale(1);
+            
+            // Ne pas interpoler la rotation pour éviter un saut d'orientation
+            
+            return d3.geoPath(interpolatedProj)(geom);
+          };
+        };
+
+        // Animer tous les pays
+        transition.selectAll('path.country')
+          .attrTween('d', function(d) { return createPathTween(d); });
+
+        // Animer la sphère
+        transition.selectAll('path')
+          .filter((d) => d && d.type === 'Sphere')
+          .attrTween('d', function(d) { return createPathTween(d); });
+
+        // Animer le graticule
+        const graticule = d3.geoGraticule10();
+        transition.selectAll('path')
+          .filter((d) => d && d.type === 'MultiLineString')
+          .attrTween('d', function() { return createPathTween(graticule); });
+
+        // Animer les flows (toujours en géodésiques pour la cohérence)
+        transition.selectAll('path.flow')
+          .attrTween('d', function(d) {
+            return (t) => {
+              const interpolate = d3.geoInterpolate(d.srcLL, d.dstLL);
+              const dist = d3.geoDistance(d.srcLL, d.dstLL);
+              const steps = Math.max(8, Math.ceil(dist * 20));
+              const coords = d3.range(steps + 1).map(s => interpolate(s/steps));
+              const line = { type:'LineString', coordinates: coords };
+              return createPathTween(line)(t);
+            };
+          });
+
+        // Animer les points self-flow
+        transition.selectAll('circle.self-flow')
+          .attrTween('cx', function(d){
+            const ll = countryLonLat(worldGeo, d.country);
+            if (!ll) return null;
+            return (t) => {
+              const p0 = proj0(ll);
+              const p1 = proj1(ll);
+              if (!p0 || !p1) return null;
+              return p0[0] + t * (p1[0] - p0[0]);
+            };
+          })
+          .attrTween('cy', function(d){
+            const ll = countryLonLat(worldGeo, d.country);
+            if (!ll) return null;
+            return (t) => {
+              const p0 = proj0(ll);
+              const p1 = proj1(ll);
+              if (!p0 || !p1) return null;
+              return p0[1] + t * (p1[1] - p0[1]);
+            };
+          });
+
+        // À la fin de la transition
+        transition.on('end', () => {
+          projectionMode = targetMode;
+          projection = proj1;
+          path = d3.geoPath(proj1);
+          setupInteractions();
+          render(worldGeo, lastFlows);
+          updateProjectionUI();
+        });
+      }
+
+      function updateProjectionUI(){
+        toggleProjectionBtn.textContent = (projectionMode === 'globe') ? 'GLOBE' : 'MAP';
+      }
+      updateProjectionUI();
+      toggleProjectionBtn.addEventListener('click', () => {
+        const next = (projectionMode === 'globe') ? 'map' : 'globe';
+        setProjectionMode(next);
+      });
+
+      // initialiser interactions selon mode courant
+      setupInteractions();
+
       const refresh = async () => {
         const [fl, vids] = await Promise.all([fetchFlows(), fetchVideos()]);
+        lastFlows = fl;
         render(geo, fl);
         const fmt = d3.format(',');
         videoList.replaceChildren(...(vids.map(v => {
