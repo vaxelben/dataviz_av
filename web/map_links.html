@@ -167,7 +167,7 @@
 
       // const maxViews = d3.max(flows, d => d.views || 0) || 1;
       const maxCount = d3.max(flows, d => d.count || 0) || 1;
-      const stroke = d3.scaleSqrt().domain([1, maxCount]).range([0.3, 0.5]);
+      const stroke = d3.scaleSqrt().domain([1, maxCount]).range([0.5, 0.5]);
       const opacity = d3.scaleSqrt().domain([1, maxCount]).range([0.25, 0.95]);
 
       const arcs = flows.map(d => {
@@ -197,9 +197,13 @@
           const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
           const dx = x2 - x1, dy = y2 - y1;
           const norm = Math.sqrt(dx*dx + dy*dy) || 1;
-          const off = Math.min(80, norm * 0.3);
-          const cx = mx - dy / norm * off;
-          const cy = my + dx / norm * off;
+          const base = Math.min(80, norm * 0.3);
+          const horiz = Math.abs(dx) / norm;
+          const off = base * horiz;
+          let px = -dy / norm, py = dx / norm; // perpendiculaire +90°
+          if (py > 0) { px = -px; py = -py; } // garantir une composante y négative (vers le haut)
+          const cx = mx + px * off;
+          const cy = my + py * off;
           return `M${x1},${y1} Q${cx},${cy} ${x2},${y2}`;
         })
         .on('mouseenter', (ev, d) => {
