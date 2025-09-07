@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Flux pays (channel_country → trending_country)</title>
+  <style>
+    :root { --bg:#0f172a; --panel:#0b1220; --text:#e5e7eb; --muted:#9ca3af; --border:#1f2937; }
+    *{box-sizing:border-box}
+    html, body { height:100%; }
+    body{margin:0;background:var(--bg);color:var(--text);font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial; overflow:hidden}
+    header{display:none}
+    main{padding:0; height:100%;}
+    .row{display:grid; grid-template-columns: 1fr 360px; gap:0; height:100%;}
+    #mapPanel{ padding:0; }
+    #filterPanel{ background:transparent; border:none; border-radius:0; padding:12px; }
+    .panel{ background:transparent; border:none; border-radius:0; }
+    #map{ width:100%; height:100%; position: relative; }
+    #map svg{ cursor: default; }
+    .btn-reset{ position:absolute; top:12px; left:12px; width:36px; height:36px; display:grid; place-items:center; border:1px solid var(--border); background:#0b1220aa; color:var(--text); border-radius:8px; cursor:pointer; z-index:5; }
+    .btn-reset:hover{ background:#111827; }
+    .btn-drag{ position:absolute; top:12px; left:56px; width:36px; height:36px; display:grid; place-items:center; border:1px solid var(--border); background:#0b1220aa; color:var(--text); border-radius:8px; cursor:pointer; z-index:5; }
+    .btn-drag:hover{ background:#111827; }
+    .btn-drag.is-on{ outline:2px solid #22c55e; }
+    label{display:block;margin-bottom:8px;color:var(--muted);font-size:13px}
+    select,input{width:100%;padding:8px 10px;background:#0f172a;border:1px solid var(--border);border-radius:8px;color:var(--text)}
+    .tooltip{position:fixed;pointer-events:none;background:#111827;border:1px solid var(--border);padding:8px 10px;border-radius:8px;font-size:12px;color:var(--text);display:none}
+    .country{ transition: fill .18s ease, stroke .18s ease, stroke-width .18s ease; }
+    .country.hl{ fill:#162033; stroke:#22c55e; stroke-width:1.0; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>Flux entre pays: channel_country → video_trending_country</div>
+    <a href="/">Retour</a>
+  </header>
+  <main>
+    <div class="row">
+      <div class="panel" id="mapPanel">
+        <div id="map">
+          <button id="resetView" class="btn-reset" title="Réinitialiser la vue" aria-label="Réinitialiser la vue">⟲</button>
+          <button id="toggleDrag" class="btn-drag" title="Activer/Désactiver le déplacement" aria-label="Activer/Désactiver le déplacement">✥</button>
+        </div>
+      </div>
+      <div class="panel" id="filterPanel" style="display:flex;flex-direction:column;gap:12px;overflow:auto">
+        <div style="display:flex;align-items:center;gap:8px">
+          <button id="toggleMode" title="Basculer mode flux" aria-label="Basculer mode" style="min-width:64px;border:1px solid var(--border);background:#0b1220aa;color:var(--text);border-radius:8px;padding:6px 10px;cursor:pointer">OFF</button>
+          <div class="muted">Mode: OFF = domestique (src = dst), ON = international (src ≠ dst)</div>
+        </div>
+        <!-- Source unique: yt_clean -->
+        <label style="margin-top:10px">Date (video_trending_date)</label>
+        <input id="dateSlider" type="range" min="0" max="0" step="1" value="0" style="width:100%" />
+        <div class="muted" id="dateLabel" style="margin-top:6px">—</div>
+        <label style="margin-top:12px">channel_country</label>
+        <select id="srcCountries" style="width:100%"></select>
+        <div style="border-top:1px solid var(--border); padding-top:10px"></div>
+        <div class="muted">Vidéos sélectionnées</div>
+        <div id="videoList" style="font-size:12px; line-height:1.35; max-height:40vh; overflow:auto; border:1px solid var(--border); border-radius:8px; padding:8px"></div>
+      </div>
+    </div>
+  </main>
+  <div class="tooltip" id="tip"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <script src="https://cdn.jsdelivr.net/npm/topojson-client@3"></script>
+  <script>
+    const $ = s => document.querySelector(s);
+    const tip = $('#tip');
+
+    const width = 980, height = 540;
+    const svg = d3.select('#map').append('svg').attr('viewBox', `0 0 ${width} ${height}`).style('width','100%').style('height','100%');
+    const g = svg.append('g');
+    const projection = d3.geoNaturalEarth1().scale(165).translate([width/2, height/2]);
+    const path = d3.geoPath(projection);
+
+    function normalizeName(s){
+      if(!s) return null;
+      let k = String(s).trim().toLowerCase();
+      k = k.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      const synonyms = {
+        'united states': 'united states of america', 'usa':'united states of america', 'etats-unis':'united states of america', 'etats unis':'united states of america',
+        'uk': 'united kingdom', 'great britain':'united kingdom', 'royaume-uni':'united kingdom', 'royaume uni':'united kingdom',
+        'russia':'russian federation', 'russie':'russian federation',
+        'south korea':'korea, republic of', "north korea":"korea, democratic people's republic of",
+        'czech republic':'czechia', 'ivory coast':"cote d'ivoire", 'swaziland':'eswatini', 'cape verde':'cabo verde', 'laos':'lao pdr',
+        'burma':'myanmar',
+        'espagne':'spain', 'allemagne':'germany', 'italie':'italy', 'pays-bas':'netherlands', 'emirats arabes unis':'united arab emirates',
+        'fra':'france', 'fr':'france'
+      };
+      return synonyms[k] || k;
+    }
+
+    async function loadWorld(){
+      const topo = await fetch('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json').then(r=>r.json());
+      const geo = topojson.feature(topo, topo.objects.countries);
+      return geo;
+    }
+
+    let dates = [];
+    const dateSlider = document.getElementById('dateSlider');
+    const dateLabel = document.getElementById('dateLabel');
+    const srcSelect = document.getElementById('srcCountries');
+    const videoList = document.getElementById('videoList');
+    const toggleModeBtn = document.getElementById('toggleMode');
+    let mode = 'off'; // 'off' = domestique (src=dst), 'on' = international (src!=dst)
+
+    async function fetchFlows(){
+      const qs = new URLSearchParams();
+      if(dates.length){
+        const idx = +dateSlider.value || 0;
+        const onDate = dates[Math.max(0, Math.min(idx, dates.length-1))];
+        if(onDate) qs.set('onDate', onDate);
+      }
+      const selected = srcSelect.value;
+      if(selected){ qs.set('src', selected); }
+      if(mode){ qs.set('mode', mode); }
+      const res = await fetch(`/api/flow/country?${qs.toString()}`);
+      const js = await res.json();
+      if(!res.ok) throw new Error(js.error||'Erreur API');
+      return js.data;
+    }
+
+    async function fetchVideos(){
+      const qs = new URLSearchParams();
+      if(dates.length){
+        const idx = +dateSlider.value || 0;
+        const onDate = dates[Math.max(0, Math.min(idx, dates.length-1))];
+        if(onDate) qs.set('onDate', onDate);
+      }
+      const selected = srcSelect.value;
+      if(selected){ qs.set('src', selected); }
+      const res = await fetch(`/api/videos?${qs.toString()}`);
+      const js = await res.json();
+      if(!res.ok) throw new Error(js.error||'Erreur API');
+      return js.data || [];
+    }
+
+    const anchorOverrides = {
+      // lon, lat ancrés au centre métropolitain
+      'france': [2.2137, 46.2276],
+    };
+
+    function countryCentroid(geo, name){
+      const key = normalizeName(name);
+      if (key && anchorOverrides[key]) {
+        const p = projection(anchorOverrides[key]);
+        return p;
+      }
+      for(const f of geo.features){
+        const nm = normalizeName(f.properties && f.properties.name);
+        if(nm === key){
+          return path.centroid(f);
+        }
+      }
+      return null;
+    }
+
+    function render(geo, flows){
+
+      g.selectAll('*').remove();
+      g.selectAll('path.country').data(geo.features).join('path')
+        .attr('class', 'country')
+        .attr('d', path)
+        .attr('data-key', d => normalizeName(d.properties && d.properties.name) || '')
+        .attr('fill', '#0b1220')
+        .attr('stroke', '#1f2937').attr('stroke-width', .6);
+
+      // const maxViews = d3.max(flows, d => d.views || 0) || 1;
+      const maxCount = d3.max(flows, d => d.count || 0) || 1;
+      const stroke = d3.scaleSqrt().domain([1, maxCount]).range([0.3, 0.5]);
+      const opacity = d3.scaleSqrt().domain([1, maxCount]).range([0.25, 0.95]);
+
+      const arcs = flows.map(d => {
+        const a = countryCentroid(geo, d.src);
+        const b = countryCentroid(geo, d.dst);
+        if(!a || !b) return null;
+        return { a, b, count: d.count, views: d.views, src: d.src, dst: d.dst };
+      }).filter(Boolean);
+
+      // Dessiner des courbes quadratiques simples
+      const setHighlight = (key) => {
+        g.selectAll('path.country').classed('hl', false);
+        if (key) {
+          const sel = g.select(`path.country[data-key="${key}"]`);
+          sel.classed('hl', true);
+        }
+      };
+
+      g.selectAll('path.flow').data(arcs).join('path')
+        .attr('class', 'flow')
+        .attr('fill', 'none')
+        .attr('stroke', '#22c55e')
+        .attr('stroke-opacity', d => opacity(d.count||0))
+        .attr('stroke-width', d => stroke(d.count||0))
+        .attr('d', d => {
+          const [x1,y1] = d.a, [x2,y2] = d.b;
+          const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+          const dx = x2 - x1, dy = y2 - y1;
+          const norm = Math.sqrt(dx*dx + dy*dy) || 1;
+          const off = Math.min(80, norm * 0.3);
+          const cx = mx - dy / norm * off;
+          const cy = my + dx / norm * off;
+          return `M${x1},${y1} Q${cx},${cy} ${x2},${y2}`;
+        })
+        .on('mouseenter', (ev, d) => {
+          const key = normalizeName(d.dst);
+          setHighlight(key);
+        })
+        .on('mousemove', (ev, d) => {
+          tip.style.display = 'block';
+          tip.style.left = (ev.clientX + 12) + 'px';
+          tip.style.top = (ev.clientY + 12) + 'px';
+          const v = d.views || 0;
+          tip.textContent = `${d.src} → ${d.dst}: ${d.count} vidéos, ${d3.format(',')(v)} vues`;
+        })
+        .on('mouseleave', ()=>{ tip.style.display = 'none'; setHighlight(null); });
+
+      // Cercles pour les flux où src == dst (comptage de vidéos distinctes au jour sélectionné)
+      const selfFlows = flows.filter(d => normalizeName(d.src) === normalizeName(d.dst));
+      const maxSelf = d3.max(selfFlows, d => d.count || 0) || 1;
+      const rSelf = d3.scaleSqrt().domain([1, maxSelf]).range([3, 16]);
+      const points = selfFlows.map(d => {
+        const c = countryCentroid(geo, d.dst);
+        if(!c) return null;
+        return { x:c[0], y:c[1], country:d.dst, count:d.count };
+      }).filter(Boolean);
+
+      g.selectAll('circle.self-flow').data(points).join('circle')
+        .attr('class', 'self-flow')
+        .attr('cx', d => d.x)
+        .attr('cy', d => d.y)
+        .attr('r', d => rSelf(d.count||0))
+        .attr('fill', '#22c55e')
+        .attr('fill-opacity', 0.28)
+        .attr('stroke', '#22c55e')
+        .attr('stroke-width', 1)
+        .on('mouseenter', (ev, d) => { setHighlight(normalizeName(d.country)); })
+        .on('mousemove', (ev, d) => {
+          tip.style.display = 'block';
+          tip.style.left = (ev.clientX + 12) + 'px';
+          tip.style.top = (ev.clientY + 12) + 'px';
+          tip.textContent = `${d.country}: ${d.count} vidéo(s)`;
+        })
+        .on('mouseleave', ()=>{ tip.style.display = 'none'; setHighlight(null); });
+    }
+
+    async function init(){
+      const [geo, dateList] = await Promise.all([
+        loadWorld(),
+        fetch(`/api/meta/dates`).then(r=>r.json()).catch(()=>({dates:[]}))
+      ]);
+      dates = (dateList && Array.isArray(dateList.dates)) ? dateList.dates : [];
+      dateSlider.min = 0; dateSlider.max = Math.max(0, dates.length-1); dateSlider.value = Math.max(0, dates.length-1);
+      dateLabel.textContent = dates.length ? dates[+dateSlider.value] : '—';
+      // Charger les pays source
+      const channels = await fetch('/api/meta/channels').then(r=>r.json()).catch(()=>({countries:[]}));
+      const countries = (channels && Array.isArray(channels.countries)) ? channels.countries : [];
+      srcSelect.replaceChildren(...countries.map(c => {
+        const opt = document.createElement('option');
+        opt.value = c; opt.textContent = c; return opt;
+      }));
+      // Sélection par défaut: France
+      const franceOpt = Array.from(srcSelect.options).find(o => (o.value||'').toLowerCase() === 'france');
+      if(franceOpt){ srcSelect.value = franceOpt.value; }
+      const [flows, vids] = await Promise.all([fetchFlows(), fetchVideos()]);
+      render(geo, flows);
+      const fmt0 = d3.format(',');
+      videoList.replaceChildren(...(vids.map(v => {
+        const row = document.createElement('div');
+        row.style.display = 'grid';
+        row.style.gridTemplateColumns = '1fr auto auto';
+        row.style.gap = '8px';
+        const title = document.createElement('div');
+        title.textContent = v.video_title || v.video_id;
+        const views = document.createElement('div');
+        views.textContent = `${fmt0(v.views||0)} vues`;
+        views.style.color = '#9ca3af';
+        const likes = document.createElement('div');
+        likes.textContent = `${fmt0(v.likes||0)} likes`;
+        likes.style.color = '#9ca3af';
+        row.appendChild(title); row.appendChild(views); row.appendChild(likes);
+        return row;
+      })));
+
+      // Zoom & pan (roulette + drag)
+      let dragEnabled = false;
+      const zoom = d3.zoom()
+        .scaleExtent([0.7, 12])
+        .filter((event) => {
+          // roulette de souris toujours active; drag seulement si activé
+          if (event.type === 'wheel') return true;
+          if (event.type === 'mousedown') return dragEnabled && event.button === 0;
+          return false;
+        })
+        .on('start', () => { if (dragEnabled) svg.style('cursor','grabbing'); })
+        .on('end',   () => { svg.style('cursor', dragEnabled ? 'grab' : 'default'); })
+        .on('zoom', (ev) => { g.attr('transform', ev.transform); });
+      svg.call(zoom).on('dblclick.zoom', null);
+
+      // Bouton de réinitialisation de la vue
+      const btnReset = document.getElementById('resetView');
+      function resetView(){ svg.transition().duration(350).call(zoom.transform, d3.zoomIdentity); }
+      btnReset.addEventListener('click', resetView);
+
+      // Bouton toggle drag
+      const btnDrag = document.getElementById('toggleDrag');
+      function updateDragUI(){
+        btnDrag.classList.toggle('is-on', dragEnabled);
+        svg.style('cursor', dragEnabled ? 'grab' : 'default');
+      }
+      updateDragUI();
+      btnDrag.addEventListener('click', () => {
+        dragEnabled = !dragEnabled;
+        updateDragUI();
+      });
+
+      const refresh = async () => {
+        const [fl, vids] = await Promise.all([fetchFlows(), fetchVideos()]);
+        render(geo, fl);
+        const fmt = d3.format(',');
+        videoList.replaceChildren(...(vids.map(v => {
+          const row = document.createElement('div');
+          row.style.display = 'grid';
+          row.style.gridTemplateColumns = '1fr auto auto';
+          row.style.gap = '8px';
+          const title = document.createElement('div');
+          title.textContent = v.video_title || v.video_id;
+          const views = document.createElement('div');
+          views.textContent = `${fmt(v.views||0)} vues`;
+          views.style.color = '#9ca3af';
+          const likes = document.createElement('div');
+          likes.textContent = `${fmt(v.likes||0)} likes`;
+          likes.style.color = '#9ca3af';
+          row.appendChild(title); row.appendChild(views); row.appendChild(likes);
+          return row;
+        })));
+      };
+      // Source fixe: yt_clean (pas d'écouteur de changement de table)
+      dateSlider.addEventListener('input', async ()=>{
+        dateLabel.textContent = dates.length ? dates[+dateSlider.value] : '—';
+        await refresh();
+      });
+      srcSelect.addEventListener('change', refresh);
+      toggleModeBtn.addEventListener('click', async () => {
+        mode = (mode === 'off') ? 'on' : 'off';
+        toggleModeBtn.textContent = mode.toUpperCase();
+        await refresh();
+      });
+    }
+    init();
+  </script>
+</body>
+</html>
+
+

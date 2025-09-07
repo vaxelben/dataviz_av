@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Query DuckDB - dataset_youtube</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #111827;
+      --text: #e5e7eb;
+      --muted: #9ca3af;
+      --accent: #22c55e;
+      --danger: #ef4444;
+      --border: #1f2937;
+      --code: #0b1220;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 0; background: var(--bg); color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+    }
+    header {
+      padding: 16px 20px; border-bottom: 1px solid var(--border); background: var(--panel);
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      position: sticky; top: 0; z-index: 10;
+    }
+    header h1 { font-size: 16px; margin: 0; color: var(--text); font-weight: 600; }
+    header .right { display: flex; gap: 8px; align-items: center; }
+    main { padding: 18px; max-width: 1280px; margin: 0 auto; }
+    .row { display: grid; grid-template-columns: 1fr; gap: 14px; }
+    @media (min-width: 1000px) { .row { grid-template-columns: 520px 1fr; } }
+    .card { border: 1px solid var(--border); background: var(--panel); border-radius: 10px; overflow: hidden; }
+    .card .title { padding: 12px 14px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+    .card .content { padding: 12px; }
+    .controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+    button, select, input[type="number"] {
+      background: #0b1220; color: var(--text); border: 1px solid var(--border); border-radius: 8px;
+      padding: 8px 10px; font-size: 14px;
+    }
+    button.primary { background: var(--accent); color: #052e16; border-color: #16a34a; font-weight: 600; }
+    button.danger { background: var(--danger); color: white; border-color: #dc2626; }
+    button:disabled { opacity: .6; cursor: not-allowed; }
+    textarea {
+      width: 100%; min-height: 220px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      background: var(--code); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 12px; line-height: 1.45;
+    }
+    .status { font-size: 12px; color: var(--muted); display: flex; gap: 12px; align-items: center; }
+    .error { color: var(--danger); white-space: pre-wrap; font-family: ui-monospace, monospace; }
+    table { border-collapse: separate; border-spacing: 0; width: 100%; }
+    thead th { position: sticky; top: 0; background: #0b1220; z-index: 1; }
+    th, td { border-bottom: 1px solid var(--border); padding: 8px 10px; text-align: left; font-size: 13px; vertical-align: top; }
+    tbody tr:hover { background: rgba(255,255,255,.03); }
+    .table-wrap { overflow: auto; max-height: 60vh; border: 1px solid var(--border); border-radius: 10px; }
+    .muted { color: var(--muted); }
+    .footer { padding: 10px 0 0; font-size: 12px; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>DuckDB Query - dataset_youtube</h1>
+    <div class="right">
+      <span class="muted">Base: <code>youtube.duckdb</code></span>
+      <a href="/map.html" style="text-decoration:none;background:#0b1220;border:1px solid var(--border);padding:6px 10px;border-radius:8px;color:#e5e7eb">Carte</a>
+      <a href="/map_links.html" style="text-decoration:none;background:#0b1220;border:1px solid var(--border);padding:6px 10px;border-radius:8px;color:#e5e7eb">Flux</a>
+      <button class="danger" id="btnClear">Effacer résultats</button>
+    </div>
+  </header>
+  <main>
+    <div class="row">
+      <section class="card">
+        <div class="title">Requête SQL</div>
+        <div class="content">
+          <div class="controls">
+            <button class="primary" id="btnRun">Exécuter (Ctrl+Enter)</button>
+            <select id="examples">
+              <option value="">Exemples...</option>
+              <option value="select video_id, video_trending_country, video_trending_date, count(*) from yt_clean group by all order by count(*) desc;">select video_id, video_trending_country, video_trending_date, count(*) from yt_clean group by all order by count(*) desc;</option>
+              <option value="SELECT channelTitle, COUNT(*) AS videos FROM youtube GROUP BY 1 ORDER BY videos DESC LIMIT 20;">Top 20 chaînes par nombre de vidéos</option>
+              <option value="SELECT categoryId, COUNT(*) AS n FROM youtube GROUP BY 1 ORDER BY n DESC;">Répartition par catégorie</option>
+            </select>
+            <label class="muted">Max lignes <input type="number" id="maxRows" value="500" min="1" max="50000" style="width:90px" /></label>
+          </div>
+          <textarea id="sql" spellcheck="false">SELECT *
+FROM youtube
+LIMIT 50;</textarea>
+          <div class="status" id="status"></div>
+          <div class="error" id="error" style="display:none"></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="title">Résultats</div>
+        <div class="content">
+          <div class="table-wrap"><table id="result"></table></div>
+          <div class="footer">Astuce: seules les requêtes SELECT/WITH sont autorisées côté serveur.</div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    const $ = (sel) => document.querySelector(sel);
+    const btnRun = $('#btnRun');
+    const btnClear = $('#btnClear');
+    const ta = $('#sql');
+    const tbl = $('#result');
+    const status = $('#status');
+    const errBox = $('#error');
+    const maxRowsInput = $('#maxRows');
+    const examples = $('#examples');
+
+    function setStatus(text) {
+      status.textContent = text || '';
+    }
+    function showError(msg) {
+      errBox.style.display = 'block';
+      errBox.textContent = msg;
+    }
+    function clearError() {
+      errBox.style.display = 'none';
+      errBox.textContent = '';
+    }
+    function renderTable(columns, rows) {
+      const thead = document.createElement('thead');
+      const trh = document.createElement('tr');
+      (columns || []).forEach(c => {
+        const th = document.createElement('th');
+        th.textContent = c;
+        trh.appendChild(th);
+      });
+      thead.appendChild(trh);
+
+      const tbody = document.createElement('tbody');
+      (rows || []).forEach(r => {
+        const tr = document.createElement('tr');
+        r.forEach(cell => {
+          const td = document.createElement('td');
+          td.textContent = cell === null || cell === undefined ? '' : String(cell);
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+
+      tbl.replaceChildren(thead, tbody);
+    }
+
+    async function runQuery() {
+      const sql = ta.value.trim();
+      if (!sql) return;
+      clearError();
+      setStatus('Exécution...');
+      btnRun.disabled = true;
+      try {
+        const res = await fetch('/api/query', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sql, maxRows: Number(maxRowsInput.value || 500) })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          showError(data && data.error ? data.error : 'Erreur inconnue');
+          setStatus('Échec');
+          return;
+        }
+        renderTable(data.columns, data.rows);
+        const suffix = data.truncated ? ' (tronqué)' : '';
+        setStatus(`${data.rowCount} ligne(s) - ${data.elapsedMs} ms${suffix}`);
+      } catch (e) {
+        showError(String(e));
+        setStatus('Échec');
+      } finally {
+        btnRun.disabled = false;
+      }
+    }
+
+    btnRun.addEventListener('click', runQuery);
+    btnClear.addEventListener('click', () => { tbl.replaceChildren(); setStatus(''); clearError(); });
+    ta.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        runQuery();
+      }
+    });
+    examples.addEventListener('change', () => {
+      const v = examples.value;
+      if (v) { ta.value = v; }
+      examples.selectedIndex = 0;
+    });
+
+    // Exécution initiale
+    runQuery();
+  </script>
+</body>
+<!--
+  Démarrage:
+    1) pip install -r requirements.txt
+    2) python server.py
+    3) Ouvrez http://127.0.0.1:8000
+-->
+</html>
+
+

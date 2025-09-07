@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual env
+.venv/
+venv/
+
+# OS/IDE
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Data / DB
+*.duckdb
+*.duckdb.wal
+*.parquet
+*.sqlite
+*.db
+*.log
+
+# CSV/datasets (gros fichiers)
+*.csv
+!brief/dataset_youtube_tiny.csv
+!dataset_youtube_tiny_tiny.csv
+
+# Node (si on ajoute tooling web)
+node_modules/
+dist/
+build/
+/old
+/brief
+.vscode
