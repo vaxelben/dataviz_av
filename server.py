@@ -320,6 +320,11 @@ def map_links_html():
     return send_from_directory(WEB_DIR, "map_links.html")
 
 
+@app.route("/public/<path:filename>")
+def public_files(filename: str):
+    return send_from_directory(WEB_DIR / "public", filename)
+
+
 @app.route("/api/meta/date_range", methods=["GET"])
 def api_meta_date_range():
     """Retourne min/max de video_trending_date pour la table donnée.
@@ -469,6 +474,107 @@ def api_videos():
             }
             for r in rows
         ]
+        return jsonify({"data": data, "rowCount": len(data)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/flow/video", methods=["GET"])
+def api_flow_by_video():
+    """Retourne les flux pour un video_id donné (option onDate).
+
+    Réponse: { data: [{src, dst, count, views}], total, totalViews }
+    Paramètres: videoId (requis), onDate=YYYY-MM-DD (optionnel), table (défaut: yt_clean)
+    """
+    db_path = Path(request.args.get("db") or DEFAULT_DB)
+    table = request.args.get("table", "yt_clean")
+    try:
+        table = validate_identifier(table)
+    except Exception as e:
+        return jsonify({"error": f"Nom de table invalide: {e}"}), 400
+
+    video_id_raw = (request.args.get("videoId") or "").strip()
+    if not video_id_raw:
+        return jsonify({"error": "videoId est requis"}), 400
+
+    try:
+        on_date = validate_yyyy_mm_dd(request.args.get("onDate"))
+    except Exception as e:
+        return jsonify({"error": f"Paramètre onDate invalide: {e}"}), 400
+
+    if not db_path.exists():
+        return jsonify({"error": f"Base DuckDB introuvable: {db_path}"}), 400
+
+    esc_video_id = video_id_raw.replace("'", "''").lower()
+
+    where_parts = [f"lower(video_id) = '{esc_video_id}'"]
+    if on_date:
+        where_parts.append(f"video_trending_date = DATE '{on_date}'")
+    where_sql = " AND ".join(where_parts)
+
+    sql = f"""
+        SELECT
+          channel_country AS src,
+          video_trending_country AS dst,
+          COUNT(*) AS cnt,
+          COALESCE(SUM(try_cast(regexp_replace(CAST(video_view_count AS VARCHAR), '[^0-9]', '') AS BIGINT)), 0) AS views
+        FROM {table}
+        WHERE {where_sql}
+        GROUP BY 1,2
+    """
+    try:
+        cols, rows, _, _ = run_select(db_path, sql, max_rows=10000)
+        data = [
+            {
+                "src": r[0],
+                "dst": r[1],
+                "count": int(r[2]) if r[2] is not None else 0,
+                "views": int(r[3]) if r[3] is not None else 0,
+            }
+            for r in rows
+        ]
+        total = sum(d["count"] for d in data)
+        total_views = sum(d["views"] for d in data)
+        return jsonify({"data": data, "total": total, "totalViews": total_views})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/video/views_timeline", methods=["GET"])
+def api_video_views_timeline():
+    """Série temporelle des vues par date pour un video_id.
+
+    Paramètres: videoId (requis), table (défaut: yt_clean)
+    Réponse: { data: [{ date, views }], rowCount }
+    """
+    db_path = Path(request.args.get("db") or DEFAULT_DB)
+    table = request.args.get("table", "yt_clean")
+    try:
+        table = validate_identifier(table)
+    except Exception as e:
+        return jsonify({"error": f"Nom de table invalide: {e}"}), 400
+
+    video_id_raw = (request.args.get("videoId") or "").strip()
+    if not video_id_raw:
+        return jsonify({"error": "videoId est requis"}), 400
+
+    if not db_path.exists():
+        return jsonify({"error": f"Base DuckDB introuvable: {db_path}"}), 400
+
+    esc_video_id = video_id_raw.replace("'", "''").lower()
+
+    sql = f"""
+        SELECT
+          video_trending_date::VARCHAR AS d,
+          COALESCE(MAX(try_cast(regexp_replace(CAST(video_view_count AS VARCHAR), '[^0-9]', '') AS BIGINT)), 0) AS views
+        FROM {table}
+        WHERE lower(video_id) = '{esc_video_id}' AND video_trending_date IS NOT NULL
+        GROUP BY 1
+        ORDER BY 1
+    """
+    try:
+        cols, rows, _, _ = run_select(db_path, sql, max_rows=100000)
+        data = [{"date": r[0], "views": int(r[1]) if r[1] is not None else 0} for r in rows]
         return jsonify({"data": data, "rowCount": len(data)})
     except Exception as e:
         return jsonify({"error": str(e)}), 400
