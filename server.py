@@ -437,6 +437,7 @@ def api_videos():
         return jsonify({"error": "onDate est requis"}), 400
 
     src = (request.args.get("src") or "").strip()
+    mode = (request.args.get("mode") or "").strip().lower()
 
     if not db_path.exists():
         return jsonify({"error": f"Base DuckDB introuvable: {db_path}"}), 400
@@ -445,6 +446,10 @@ def api_videos():
     if src:
         esc = src.replace("'", "''").lower()
         where_parts.append(f"lower(channel_country) = '{esc}'")
+    if mode in ("on", "international"):
+        where_parts.append("lower(trim(channel_country)) <> lower(trim(video_trending_country))")
+    elif mode in ("off", "domestic", ""):
+        where_parts.append("lower(trim(channel_country)) = lower(trim(video_trending_country))")
     where_sql = " AND ".join(where_parts)
 
     sql = f"""
@@ -506,10 +511,15 @@ def api_flow_by_video():
         return jsonify({"error": f"Base DuckDB introuvable: {db_path}"}), 400
 
     esc_video_id = video_id_raw.replace("'", "''").lower()
+    mode = (request.args.get("mode") or "").strip().lower()
 
     where_parts = [f"lower(video_id) = '{esc_video_id}'"]
     if on_date:
         where_parts.append(f"video_trending_date = DATE '{on_date}'")
+    if mode in ("on", "international"):
+        where_parts.append("lower(trim(channel_country)) <> lower(trim(video_trending_country))")
+    elif mode in ("off", "domestic", ""):
+        where_parts.append("lower(trim(channel_country)) = lower(trim(video_trending_country))")
     where_sql = " AND ".join(where_parts)
 
     sql = f"""
@@ -562,13 +572,21 @@ def api_video_views_timeline():
         return jsonify({"error": f"Base DuckDB introuvable: {db_path}"}), 400
 
     esc_video_id = video_id_raw.replace("'", "''").lower()
+    mode = (request.args.get("mode") or "").strip().lower()
+
+    where_parts = [f"lower(video_id) = '{esc_video_id}'", "video_trending_date IS NOT NULL"]
+    if mode in ("on", "international"):
+        where_parts.append("lower(trim(channel_country)) <> lower(trim(video_trending_country))")
+    elif mode in ("off", "domestic", ""):
+        where_parts.append("lower(trim(channel_country)) = lower(trim(video_trending_country))")
+    where_sql = " AND ".join(where_parts)
 
     sql = f"""
         SELECT
           video_trending_date::VARCHAR AS d,
           COALESCE(MAX(try_cast(regexp_replace(CAST(video_view_count AS VARCHAR), '[^0-9]', '') AS BIGINT)), 0) AS views
         FROM {table}
-        WHERE lower(video_id) = '{esc_video_id}' AND video_trending_date IS NOT NULL
+        WHERE {where_sql}
         GROUP BY 1
         ORDER BY 1
     """
