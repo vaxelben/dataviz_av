@@ -550,6 +550,79 @@ def api_flow_by_video():
         return jsonify({"error": str(e)}), 400
 
 
+@app.route("/api/videos/by_flow", methods=["GET"])
+def api_videos_by_flow():
+    """Retourne les vidéos pour un couple src/dst à une date donnée.
+
+    Paramètres: onDate=YYYY-MM-DD (requis), src, dst, table (défaut: yt_clean), mode (on/off)
+    Réponse: { data: [{ video_id, video_title, views, likes, src, dst }], rowCount }
+    """
+    db_path = Path(request.args.get("db") or DEFAULT_DB)
+    table = request.args.get("table", "yt_clean")
+    try:
+        table = validate_identifier(table)
+    except Exception as e:
+        return jsonify({"error": f"Nom de table invalide: {e}"}), 400
+
+    try:
+        on_date = validate_yyyy_mm_dd(request.args.get("onDate"))
+    except Exception as e:
+        return jsonify({"error": f"Paramètre onDate invalide: {e}"}), 400
+    if not on_date:
+        return jsonify({"error": "onDate est requis"}), 400
+
+    src = (request.args.get("src") or "").strip()
+    dst = (request.args.get("dst") or "").strip()
+    mode = (request.args.get("mode") or "").strip().lower()
+
+    if not db_path.exists():
+        return jsonify({"error": f"Base DuckDB introuvable: {db_path}"}), 400
+
+    where_parts = [f"video_trending_date = DATE '{on_date}'"]
+    if src:
+        esc_src = src.replace("'", "''").lower()
+        where_parts.append(f"lower(channel_country) = '{esc_src}'")
+    if dst:
+        esc_dst = dst.replace("'", "''").lower()
+        where_parts.append(f"lower(video_trending_country) = '{esc_dst}'")
+    if mode in ("on", "international"):
+        where_parts.append("lower(trim(channel_country)) <> lower(trim(video_trending_country))")
+    elif mode in ("off", "domestic", ""):
+        where_parts.append("lower(trim(channel_country)) = lower(trim(video_trending_country))")
+    where_sql = " AND ".join(where_parts)
+
+    sql = f"""
+        SELECT
+          video_id,
+          COALESCE(video_title, '') AS video_title,
+          COALESCE(try_cast(regexp_replace(CAST(video_view_count AS VARCHAR), '[^0-9]', '') AS BIGINT), 0) AS views,
+          COALESCE(try_cast(regexp_replace(CAST(video_like_count AS VARCHAR), '[^0-9]', '') AS BIGINT), 0) AS likes,
+          channel_country AS src,
+          video_trending_country AS dst
+        FROM {table}
+        WHERE {where_sql}
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY video_id, channel_country, video_trending_country ORDER BY views DESC) = 1
+        ORDER BY views DESC
+        LIMIT 2000
+    """
+    try:
+        cols, rows, _, _ = run_select(db_path, sql, max_rows=5000)
+        data = [
+            {
+                "video_id": r[0],
+                "video_title": r[1],
+                "views": int(r[2]) if r[2] is not None else 0,
+                "likes": int(r[3]) if r[3] is not None else 0,
+                "src": r[4],
+                "dst": r[5],
+            }
+            for r in rows
+        ]
+        return jsonify({"data": data, "rowCount": len(data)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
 @app.route("/api/video/views_timeline", methods=["GET"])
 def api_video_views_timeline():
     """Série temporelle des vues par date pour un video_id.

@@ -16,7 +16,7 @@
     #filterPanel{ background:transparent; border:none; border-radius:0; padding:12px; }
     .panel{ background:transparent; border:none; border-radius:0; }
     #map{ width:100%; height:auto; min-height:0; position: relative; flex:1 1 0; }
-    #chart{ width:100%; border-top:1px solid var(--border); flex:0 0 50vh; min-height:50vh; }
+    #chart{ width:100%; border-top:1px solid var(--border); flex:0 0 33vh; min-height:33vh; }
     #map svg{ cursor: default; }
     .btn-reset{ position:absolute; top:12px; left:12px; width:36px; height:36px; display:grid; place-items:center; border:1px solid var(--border); background:#0b1220aa; color:var(--text); border-radius:8px; cursor:pointer; z-index:5; }
     .btn-reset:hover{ background:#111827; }
@@ -99,7 +99,10 @@
         'czech republic':'czechia', 'ivory coast':"cote d'ivoire", 'swaziland':'eswatini', 'cape verde':'cabo verde', 'laos':'lao pdr',
         'burma':'myanmar',
         'espagne':'spain', 'allemagne':'germany', 'italie':'italy', 'pays-bas':'netherlands', 'emirats arabes unis':'united arab emirates',
-        'fra':'france', 'fr':'france'
+        'fra':'france', 'fr':'france',
+        'bosnia and herzegovina':'bosnia and herzegovina', 'north macedonia':'macedonia', 'liechtenstein':'liechtenstein',
+        // Variations possibles pour les pays problématiques
+        'macedonia':'north macedonia'
       };
       return synonyms[k] || k;
     }
@@ -107,6 +110,17 @@
     async function loadWorld(){
       const topo = await fetch('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json').then(r=>r.json());
       const geo = topojson.feature(topo, topo.objects.countries);
+      
+      // Debug: lister tous les pays disponibles (une seule fois)
+      if (!window.countriesListed) {
+        console.log('Pays disponibles dans world-atlas:');
+        geo.features.forEach(f => {
+          const name = f.properties && f.properties.name;
+          if (name) console.log(`"${name}" → normalized: "${normalizeName(name)}"`);
+        });
+        window.countriesListed = true;
+      }
+      
       return geo;
     }
 
@@ -131,6 +145,7 @@
     let selectedVideoData = null;
     let videosCache = [];
     const chartDiv = document.getElementById('chart');
+    let filterListToSelection = false;
     let arcHover = null; // { srcKey, dstKey }
     let arcFilter = null; // { srcKey, dstKey }
 
@@ -166,6 +181,22 @@
       if(selected){ qs.set('src', selected); }
       if(mode){ qs.set('mode', mode); }
       const res = await fetch(`/api/videos?${qs.toString()}`);
+      const js = await res.json();
+      if(!res.ok) throw new Error(js.error||'Erreur API');
+      return js.data || [];
+    }
+
+    async function fetchVideosByFlow(srcKey, dstKey){
+      const qs = new URLSearchParams();
+      if(dates.length){
+        const idx = +dateSlider.value || 0;
+        const onDate = dates[Math.max(0, Math.min(idx, dates.length-1))];
+        if(onDate) qs.set('onDate', onDate);
+      }
+      if (srcKey) qs.set('src', srcKey);
+      if (dstKey) qs.set('dst', dstKey);
+      if(mode){ qs.set('mode', mode); }
+      const res = await fetch(`/api/videos/by_flow?${qs.toString()}`);
       const js = await res.json();
       if(!res.ok) throw new Error(js.error||'Erreur API');
       return js.data || [];
@@ -208,6 +239,8 @@
 
     function renderViewsChartMulti(seriesList, highlightVideoId = null){
       chartDiv.replaceChildren();
+      // Nettoyer les infobulles existantes
+      d3.selectAll('.chart-tooltip').remove();
       const list = Array.isArray(seriesList) ? seriesList : [];
       if (!list.length) return;
       const m = {t:10, r:16, b:24, l:40};
@@ -235,34 +268,264 @@
       const ay = d3.axisLeft(y).ticks(4).tickSize(-innerW).tickFormat(d3.format('.2s'));
       gx.append('g').attr('transform', `translate(0,${innerH})`).call(ax).selectAll('text').attr('fill', '#9ca3af');
       gx.append('g').call(ay).call(g => g.selectAll('text').attr('fill', '#9ca3af')).call(g => g.selectAll('line').attr('stroke', '#1f2937')).call(g => g.select('.domain').attr('stroke', '#1f2937'));
+      
+      // Ajouter la ligne de référence pour la date sélectionnée
+      if (dates.length && dateSlider) {
+        const selectedDateIdx = +dateSlider.value || 0;
+        const selectedDate = dates[Math.max(0, Math.min(selectedDateIdx, dates.length-1))];
+        if (selectedDate) {
+          const selectedDateParsed = parse(selectedDate);
+          if (selectedDateParsed) {
+            const xPos = x(selectedDateParsed);
+            // Ligne verticale de référence
+            gx.append('line')
+              .attr('class', 'date-reference-line')
+              .attr('x1', xPos)
+              .attr('x2', xPos)
+              .attr('y1', 0)
+              .attr('y2', innerH)
+              .attr('stroke', '#ef4444')
+              .attr('stroke-width', 2)
+              .attr('stroke-dasharray', '4,4')
+              .attr('opacity', 0.8);
+            
+            // Label de la date
+            gx.append('text')
+              .attr('class', 'date-reference-label')
+              .attr('x', xPos)
+              .attr('y', -5)
+              .attr('text-anchor', 'middle')
+              .attr('fill', '#ef4444')
+              .attr('font-size', '11px')
+              .attr('font-weight', 'bold')
+              .text(selectedDate);
+          }
+        }
+      }
       const line = d3.line().x(d => x(d.d)).y(d => y(d.v)).curve(d3.curveMonotoneX);
+      
+      // Créer une infobulle pour le graphique
+      const chartTooltip = d3.select('body').append('div')
+        .attr('class', 'chart-tooltip')
+        .style('position', 'absolute')
+        .style('background', '#1f2937')
+        .style('color', 'white')
+        .style('padding', '8px 12px')
+        .style('border-radius', '4px')
+        .style('font-size', '12px')
+        .style('pointer-events', 'none')
+        .style('opacity', 0)
+        .style('z-index', '1000');
+      
       // tracer toutes les séries
       seriesParsed.forEach(s => {
         const isHi = !!highlightVideoId && s.videoId === highlightVideoId;
-        gx.append('path')
+        
+        // Ligne
+        const p = gx.append('path')
           .datum(s.pts)
           .attr('class', 'series-line')
           .attr('data-video-id', s.videoId)
           .attr('fill', 'none')
           .attr('stroke', '#22c55e')
           .attr('stroke-opacity', isHi ? 1 : 0.35)
-          .attr('stroke-width', isHi ? 2 : 1)
+          .attr('stroke-width', isHi ? 3 : 2)
           .attr('d', line);
+        
+        // Points sur la ligne
+        const videoData = (videosCache || []).find(v => v.video_id === s.videoId);
+        const videoTitle = videoData ? videoData.video_title || s.videoId : s.videoId;
+        
+        gx.selectAll(`.point-${s.videoId}`)
+          .data(s.pts)
+          .join('circle')
+          .attr('class', `point-${s.videoId} series-point`)
+          .attr('data-video-id', s.videoId)
+          .attr('cx', d => x(d.d))
+          .attr('cy', d => y(d.v))
+          .attr('r', isHi ? 2.5 : 2)
+          .attr('fill', '#22c55e')
+          .attr('fill-opacity', isHi ? 0.7 : 0)
+          .style('cursor', 'pointer')
+          .on('mouseenter', function(event, d) {
+            // Rendre le point visible au survol
+            d3.select(this).attr('fill-opacity', 0.7);
+            
+            const formatDate = d3.utcFormat('%Y-%m-%d');
+            const formatViews = d3.format(',');
+            chartTooltip
+              .style('opacity', 1)
+              .html(`<strong>ID:</strong> ${s.videoId}<br/><strong>${videoTitle}</strong><br/>Date: ${formatDate(d.d)}<br/>Vues: ${formatViews(d.v)}`)
+              .style('left', (event.pageX + 10) + 'px')
+              .style('top', (event.pageY - 10) + 'px');
+          })
+          .on('mousemove', function(event) {
+            chartTooltip
+              .style('left', (event.pageX + 10) + 'px')
+              .style('top', (event.pageY - 10) + 'px');
+          })
+          .on('mouseleave', function() {
+            // Rendre le point invisible quand on quitte le survol (sauf si ligne surbrillée ou vidéo sélectionnée)
+            const videoId = d3.select(this).attr('data-video-id');
+            const isHighlighted = highlightVideoId === videoId;
+            const isSelected = selectedVideoId === videoId;
+            d3.select(this).attr('fill-opacity', (isHighlighted || isSelected) ? 0.7 : 0);
+            
+            chartTooltip.style('opacity', 0);
+          })
+          .on('click', async function(event) {
+            // Même comportement de filtrage que pour les lignes
+            const videoId = d3.select(this).attr('data-video-id');
+            arcFilter = null; // Réinitialiser le filtre d'arc
+            
+            if (selectedVideoId === videoId) {
+              // Désélectionner => restaurer la liste complète
+              selectedVideoId = null; selectedVideoData = null;
+              const fullVideos = await fetchVideos();
+              videosCache = fullVideos;
+              if (window.renderVideoList) window.renderVideoList(fullVideos);
+              if (window.highlightSelectedVideoRow) window.highlightSelectedVideoRow();
+              if (window.refreshMapOnly) await window.refreshMapOnly();
+              const series = await fetchTimelinesForVideos(fullVideos, 5);
+              renderViewsChartMulti(series, null);
+            } else {
+              // Sélectionner => filtrer pour cette vidéo uniquement
+              selectedVideoId = videoId;
+              selectedVideoData = (videosCache||[]).find(v => v.video_id === videoId) || null;
+              
+              // Si la vidéo n'est pas trouvée dans videosCache, la créer
+              if (!selectedVideoData) {
+                selectedVideoData = { video_id: videoId, video_title: `Vidéo ${videoId}` };
+              }
+              
+              // Filtrer la liste pour ne montrer que cette vidéo
+              const filteredVideos = [selectedVideoData];
+              if (window.renderVideoList) window.renderVideoList(filteredVideos);
+              if (window.highlightSelectedVideoRow) window.highlightSelectedVideoRow();
+              
+              // Mettre à jour la map avec les arcs de cette vidéo uniquement
+              if (window.refreshMapOnly) await window.refreshMapOnly();
+              
+              // Afficher seulement la ligne de cette vidéo dans le graphique
+              const tl = await fetchVideoViewsTimeline(selectedVideoId);
+              renderViewsChartMulti([{ videoId: selectedVideoId, data: tl }], selectedVideoId);
+            }
+            
+            // Empêcher la propagation pour éviter le clic sur le fond du graphique
+            event.stopPropagation();
+          });
+        p.on('mouseenter', () => { setChartHighlightMany([s.videoId]); highlightVideoRowsByIds([s.videoId]); highlightMapForVideo(s.videoId); });
+        p.on('mouseleave', () => { setChartHighlightMany(null); if (window.highlightSelectedVideoRow) window.highlightSelectedVideoRow(); if (!arcFilter) updateMapFlowHighlight(null); });
+        p.on('click', async () => {
+          // Cliquer une série dans le graphe => filtrer tous les éléments pour cette vidéo
+          arcFilter = null; // Réinitialiser le filtre d'arc
+          
+          if (selectedVideoId === s.videoId) {
+            // Désélectionner => restaurer la liste complète
+            selectedVideoId = null; selectedVideoData = null;
+            const fullVideos = await fetchVideos();
+            videosCache = fullVideos;
+            if (window.renderVideoList) window.renderVideoList(fullVideos);
+            if (window.highlightSelectedVideoRow) window.highlightSelectedVideoRow();
+            if (window.refreshMapOnly) await window.refreshMapOnly();
+            const series = await fetchTimelinesForVideos(fullVideos, 20);
+            renderViewsChartMulti(series, null);
+          } else {
+            // Sélectionner => filtrer pour cette vidéo uniquement
+            selectedVideoId = s.videoId;
+            selectedVideoData = (videosCache||[]).find(v => v.video_id === s.videoId) || null;
+            
+            // Si la vidéo n'est pas trouvée dans videosCache, la créer
+            if (!selectedVideoData) {
+              selectedVideoData = { video_id: s.videoId, video_title: `Vidéo ${s.videoId}` };
+            }
+            
+            // Filtrer la liste pour ne montrer que cette vidéo
+            const filteredVideos = [selectedVideoData];
+            if (window.renderVideoList) window.renderVideoList(filteredVideos);
+            if (window.highlightSelectedVideoRow) window.highlightSelectedVideoRow();
+            
+            // Mettre à jour la map avec les arcs de cette vidéo uniquement
+            if (window.refreshMapOnly) await window.refreshMapOnly();
+            
+            // Afficher seulement la ligne de cette vidéo dans le graphique
+            const tl = await fetchVideoViewsTimeline(selectedVideoId);
+            renderViewsChartMulti([{ videoId: selectedVideoId, data: tl }], selectedVideoId);
+          }
+        });
       });
+      
+      // Ajouter un gestionnaire de clic sur le fond du graphique pour supprimer les filtres
+      const svgChart = d3.select(chartDiv).select('svg');
+      if (!svgChart.empty()) {
+        svgChart.on('click', (ev) => {
+          const target = ev.target;
+          // Ignorer les clics sur les lignes (path.series-line) et les points (circle.series-point)
+          if (target && target.tagName) {
+            const tagName = target.tagName.toLowerCase();
+            if ((tagName === 'path' && target.classList.contains('series-line')) ||
+                (tagName === 'circle' && target.classList.contains('series-point'))) {
+              return;
+            }
+          }
+          // Supprimer les filtres dynamiques
+          selectedVideoId = null; 
+          selectedVideoData = null;
+          arcFilter = null;
+          
+          (async () => {
+            // Recharger la liste complète
+            const vids = await fetchVideos();
+            videosCache = vids;
+            if (window.renderVideoList) window.renderVideoList(vids);
+            if (window.highlightSelectedVideoRow) window.highlightSelectedVideoRow();
+            
+            // Rétablir la map par défaut
+            if (window.refreshMapOnly) await window.refreshMapOnly();
+            
+            // Rétablir le graphique par défaut
+            const series = await fetchTimelinesForVideos(vids, 20);
+            renderViewsChartMulti(series, null);
+          })();
+        });
+      }
     }
 
     function setChartHighlightMany(videoIds){
       const ids = Array.isArray(videoIds) ? new Set(videoIds) : null;
       const svgC = d3.select(chartDiv).select('svg');
       if (svgC.empty()) return;
+      
+      // Mettre en surbrillance les lignes
       const lines = svgC.selectAll('path.series-line');
-      if (lines.empty()) return;
-      if (ids && ids.size){
-        lines
-          .attr('stroke-opacity', function(){ return ids.has(this.getAttribute('data-video-id')) ? 1 : 0.15; })
-          .attr('stroke-width', function(){ return ids.has(this.getAttribute('data-video-id')) ? 2 : 1; });
-      } else {
-        lines.attr('stroke-opacity', 0.35).attr('stroke-width', 1);
+      if (!lines.empty()) {
+        if (ids && ids.size){
+          lines
+            .attr('stroke-opacity', function(){ return ids.has(this.getAttribute('data-video-id')) ? 1 : 0.15; })
+            .attr('stroke-width', function(){ return ids.has(this.getAttribute('data-video-id')) ? 3 : 2; });
+        } else {
+          lines.attr('stroke-opacity', 0.35).attr('stroke-width', 2);
+        }
+      }
+      
+      // Mettre en surbrillance les points
+      const points = svgC.selectAll('circle.series-point');
+      if (!points.empty()) {
+        if (ids && ids.size){
+          points
+            .attr('fill-opacity', function(){ 
+              const videoId = this.getAttribute('data-video-id');
+              return (ids.has(videoId) || selectedVideoId === videoId) ? 0.7 : 0; 
+            })
+            .attr('r', function(){ return ids.has(this.getAttribute('data-video-id')) ? 2.5 : 2; });
+        } else {
+          points
+            .attr('fill-opacity', function(){ 
+              const videoId = this.getAttribute('data-video-id');
+              return selectedVideoId === videoId ? 0.7 : 0; 
+            })
+            .attr('r', 2);
+        }
       }
     }
 
@@ -309,6 +572,22 @@
         });
     }
 
+    async function highlightMapForVideo(videoId){
+      if (arcFilter) return;
+      if (!videoId){ updateMapFlowHighlight(null); return; }
+      try{
+        const cacheKey = `${videoId}|${dateSlider.value}|${mode}`;
+        let pairsSet = flowsByVideoCache.get(cacheKey);
+        if (!pairsSet){
+          const fl = await fetchFlowsByVideo(videoId);
+          pairsSet = new Set((fl||[]).map(e => `${normalizeName(e.src)}->${normalizeName(e.dst)}`));
+          flowsByVideoCache.set(cacheKey, pairsSet);
+        }
+        updateMapFlowHighlight(pairsSet);
+      }catch{
+        updateMapFlowHighlight(null);
+      }
+    }
     async function setChartHighlight(videoId){
       const selId = videoId || (selectedVideoId || null);
       const svgC = d3.select(chartDiv).select('svg');
@@ -346,6 +625,10 @@
     const anchorOverrides = {
       // lon, lat ancrés au centre métropolitain
       'france': [2.2137, 46.2276],
+      // Pays manquants dans world-atlas
+      'bosnia and herzegovina': [17.6791, 43.9159],
+      'north macedonia': [21.7453, 41.6086], 
+      'liechtenstein': [9.5215, 47.1410]
     };
 
     function updateSelectedCountryHighlight(){
@@ -455,7 +738,12 @@
       const arcs = flowsInput.map(d => {
         const srcLL = countryLonLat(geo, d.src);
         const dstLL = countryLonLat(geo, d.dst);
-        if(!srcLL || !dstLL) return null;
+        if(!srcLL || !dstLL) {
+          // Debug: afficher les pays non résolus
+          if (!srcLL) console.warn(`Pays source non trouvé: "${d.src}"`);
+          if (!dstLL) console.warn(`Pays destination non trouvé: "${d.dst}"`);
+          return null;
+        }
         return { srcLL, dstLL, count: d.count, views: d.views, src: d.src, dst: d.dst };
       }).filter(Boolean);
 
@@ -511,17 +799,26 @@
         .on('mouseenter', (ev, d) => {
           const key = normalizeName(d.dst);
           setHighlight(key);
-          arcHover = { srcKey: normalizeName(d.src), dstKey: normalizeName(d.dst) };
+          arcHover = { srcKey: normalizeName(d.src), dstKey: normalizeName(d.dst), rawSrc: d.src, rawDst: d.dst };
           // surbrillance côté graphe/liste pour TOUTES les vidéos correspondantes
-          const vids = (videosCache||[]).filter(x => normalizeName(x.src) === arcHover.srcKey && normalizeName(x.dst) === arcHover.dstKey);
-          const ids = vids.map(v => v.video_id);
-          setChartHighlightMany(ids);
-          if (ids.length){
-            highlightVideoRowsByIds(ids);
-          } else {
-            // fallback: si la liste ne contient pas ces vidéos (tri/filtre), highlight par paire
-            highlightVideoRowsByPair(arcHover.srcKey, arcHover.dstKey);
-          }
+          (async () => {
+            // récupérer toutes les vidéos du couple src/dst pour la date/mode et surligner
+            try{
+              const qs = new URLSearchParams();
+              if (dates.length){ const idx = +dateSlider.value||0; const onDate = dates[Math.max(0, Math.min(idx, dates.length-1))]; if (onDate) qs.set('onDate', onDate); }
+              qs.set('src', arcHover.rawSrc || '');
+              qs.set('dst', arcHover.rawDst || '');
+              if (mode) qs.set('mode', mode);
+              const res = await fetch(`/api/videos/by_flow?${qs.toString()}`);
+              const js = await res.json();
+              const vids = (res.ok && js && Array.isArray(js.data)) ? js.data : [];
+              const ids = vids.map(v => v.video_id);
+              setChartHighlightMany(ids);
+              if (ids.length){ highlightVideoRowsByIds(ids); } else { highlightVideoRowsByPair(arcHover.srcKey, arcHover.dstKey); }
+            }catch{
+              highlightVideoRowsByPair(arcHover.srcKey, arcHover.dstKey);
+            }
+          })();
         })
         .on('mousemove', (ev, d) => {
           tip.style.display = 'block';
@@ -539,21 +836,17 @@
         })
         .on('click', async (ev, d) => {
           // clic sur arc => activer filtre
-          arcFilter = { srcKey: normalizeName(d.src), dstKey: normalizeName(d.dst) };
+          arcFilter = { srcKey: normalizeName(d.src), dstKey: normalizeName(d.dst), rawSrc: d.src, rawDst: d.dst };
           render(worldGeo, lastFlows);
-          // pour le graphe: si une vidéo de la liste correspond, passer en vue single sinon multi
-          const vids = videosCache||[];
-          const candidates = vids.filter(x => normalizeName(x.src) === arcFilter.srcKey && normalizeName(x.dst) === arcFilter.dstKey);
-          if (candidates.length > 0){
-            const series = await fetchTimelinesForVideos(candidates, Math.min(50, candidates.length));
-            renderViewsChartMulti(series, null);
-            selectedVideoId = null; selectedVideoData = null;
-            highlightVideoRowsByIds(candidates.map(v => v.video_id));
-          } else {
-            const series = await fetchTimelinesForVideos(vids, 20);
+          // filtrer la liste et le graphe avec les vidéos de cet arc
+          try{
+            const list = await fetchVideosByFlow(arcFilter.rawSrc, arcFilter.rawDst);
+            videosCache = list;
+            renderVideoList(list);
+            const series = await fetchTimelinesForVideos(list, Math.min(50, list.length));
             renderViewsChartMulti(series, null);
             selectedVideoId = null; selectedVideoData = null; highlightSelectedVideoRow();
-          }
+          }catch{}
         });
 
       // Cercles pour les flux où src == dst (comptage de vidéos distinctes au jour sélectionné)
@@ -816,9 +1109,14 @@
         }
         arcFilter = null;
         render(worldGeo, lastFlows);
-        // rétablir graphe par défaut
+        // rétablir graphe et liste par défaut
         (async () => {
-          const series = await fetchTimelinesForVideos(videosCache, 20);
+          // Recharger la liste complète
+          const vids = await fetchVideos();
+          videosCache = vids;
+          renderVideoList(videosCache);
+          
+          const series = await fetchTimelinesForVideos(videosCache, 5);
           renderViewsChartMulti(series, null);
           selectedVideoId = null; selectedVideoData = null;
           highlightSelectedVideoRow();
@@ -1003,7 +1301,7 @@
       const refresh = async () => {
         const [fl, vids] = await Promise.all([
           selectedVideoId ? fetchFlowsByVideo(selectedVideoId) : fetchFlows(),
-          fetchVideos()
+          (arcFilter && arcFilter.rawSrc && arcFilter.rawDst) ? fetchVideosByFlow(arcFilter.rawSrc, arcFilter.rawDst) : fetchVideos()
         ]);
         lastFlows = fl;
         render(geo, fl);
@@ -1013,7 +1311,7 @@
           const tl = await fetchVideoViewsTimeline(selectedVideoId);
           renderViewsChartMulti([{ videoId: selectedVideoId, data: tl }], selectedVideoId);
         } else {
-          const series = await fetchTimelinesForVideos(videosCache, 20);
+          const series = await fetchTimelinesForVideos(videosCache, 5);
           renderViewsChartMulti(series, null);
         }
       };
@@ -1023,6 +1321,7 @@
         lastFlows = fl;
         render(geo, fl);
       }
+      window.refreshMapOnly = refreshMapOnly;
 
       function highlightSelectedVideoRow(){
         const rows = Array.from(videoList.children);
@@ -1031,6 +1330,7 @@
           row.style.background = isSel ? '#0b3a2a' : '';
         });
       }
+      window.highlightSelectedVideoRow = highlightSelectedVideoRow;
 
       function renderVideoList(vids){
         const fmtNum = (n) => {
@@ -1043,13 +1343,14 @@
         // En-tête
         const header = document.createElement('div');
         header.style.display = 'grid';
-        header.style.gridTemplateColumns = '1fr auto auto';
+        header.style.gridTemplateColumns = 'auto 1fr auto auto';
         header.style.gap = '8px';
         header.style.position = 'sticky';
         header.style.top = '0';
         header.style.background = '#0b1220';
         header.style.borderBottom = '1px solid var(--border)';
         header.style.padding = '4px 4px 6px 4px';
+        const hRank = document.createElement('div'); hRank.textContent = '#'; hRank.style.color = '#9ca3af';
         const hTitle = document.createElement('div');
         const hViews = document.createElement('div');
         const hLikes = document.createElement('div');
@@ -1057,18 +1358,21 @@
         const iViews = document.createElement('img'); iViews.src = '/public/img/views_24p.svg'; iViews.width = 18; iViews.height = 18; iViews.alt = 'Vues'; iViews.style.opacity = '0.8';
         const iLikes = document.createElement('img'); iLikes.src = '/public/img/thumbs_up_24p.svg'; iLikes.width = 18; iLikes.height = 18; iLikes.alt = 'Likes'; iLikes.style.opacity = '0.8';
         hTitle.appendChild(iTitle); hViews.appendChild(iViews); hLikes.appendChild(iLikes);
-        header.appendChild(hTitle); header.appendChild(hViews); header.appendChild(hLikes);
+        header.appendChild(hRank); header.appendChild(hTitle); header.appendChild(hViews); header.appendChild(hLikes);
 
         // Lignes
-        const rows = vids.map(v => {
+        const rows = vids.map((v, i) => {
           const row = document.createElement('div');
           row.style.display = 'grid';
-          row.style.gridTemplateColumns = '1fr auto auto';
+          row.style.gridTemplateColumns = 'auto 1fr auto auto';
           row.style.gap = '8px';
           row.style.cursor = 'pointer';
           row.dataset.videoId = v.video_id;
           row.dataset.srcKey = normalizeName(v.src || '');
           row.dataset.dstKey = normalizeName(v.dst || '');
+          const rank = document.createElement('div');
+          rank.textContent = String(i + 1);
+          rank.style.color = '#9ca3af';
           const title = document.createElement('div');
           title.textContent = v.video_title || v.video_id;
           const views = document.createElement('div');
@@ -1077,23 +1381,38 @@
           const likes = document.createElement('div');
           likes.textContent = fmtNum(v.likes||0);
           likes.style.color = '#9ca3af';
-          row.appendChild(title); row.appendChild(views); row.appendChild(likes);
-          row.addEventListener('mouseenter', () => { setChartHighlight(v.video_id); });
-          row.addEventListener('mouseleave', () => { setChartHighlight(null); });
+          row.appendChild(rank); row.appendChild(title); row.appendChild(views); row.appendChild(likes);
+          row.addEventListener('mouseenter', () => { 
+            setChartHighlight(v.video_id); 
+            highlightMapForVideo(v.video_id);
+          });
+          row.addEventListener('mouseleave', () => { 
+            setChartHighlight(null); 
+            if (!arcFilter) updateMapFlowHighlight(null);
+          });
           row.addEventListener('click', async () => {
+            // Réinitialiser le filtre d'arc
+            arcFilter = null;
+            
             if (selectedVideoId === v.video_id){
+              // Désélectionner => restaurer la liste complète
               selectedVideoId = null; selectedVideoData = null;
-            } else {
-              selectedVideoId = v.video_id; selectedVideoData = v;
-            }
-            highlightSelectedVideoRow();
-            await refreshMapOnly();
-            const timeline = selectedVideoId ? await fetchVideoViewsTimeline(selectedVideoId) : [];
-            if (selectedVideoId){
-              renderViewsChartMulti([{ videoId: selectedVideoId, data: timeline }], selectedVideoId);
-            } else {
-              const series = await fetchTimelinesForVideos(videosCache, 20);
+              const fullVideos = await fetchVideos();
+              videosCache = fullVideos;
+              renderVideoList(fullVideos);
+              highlightSelectedVideoRow();
+              if (window.refreshMapOnly) await window.refreshMapOnly();
+              const series = await fetchTimelinesForVideos(fullVideos, 20);
               renderViewsChartMulti(series, null);
+            } else {
+              // Sélectionner => filtrer la liste pour cette vidéo uniquement
+              selectedVideoId = v.video_id; selectedVideoData = v;
+              const filteredVideos = [v]; // Afficher seulement cette vidéo
+              renderVideoList(filteredVideos);
+              highlightSelectedVideoRow();
+              if (window.refreshMapOnly) await window.refreshMapOnly();
+              const timeline = await fetchVideoViewsTimeline(selectedVideoId);
+              renderViewsChartMulti([{ videoId: selectedVideoId, data: timeline }], selectedVideoId);
             }
           });
           return row;
@@ -1101,20 +1420,39 @@
         videoList.replaceChildren(header, ...rows);
         highlightSelectedVideoRow();
       }
+      window.renderVideoList = renderVideoList;
       // Source fixe: yt_clean (pas d'écouteur de changement de table)
       dateSlider.addEventListener('input', async ()=>{
         dateLabel.textContent = dates.length ? dates[+dateSlider.value] : '—';
         selectedVideoId = null; selectedVideoData = null;
-        await refresh();
+        arcFilter = null; // Réinitialiser le filtre d'arc
+        
+        // Mise à jour immédiate de la map et de la liste
+        const [fl, vids] = await Promise.all([
+          selectedVideoId ? fetchFlowsByVideo(selectedVideoId) : fetchFlows(),
+          (arcFilter && arcFilter.rawSrc && arcFilter.rawDst) ? fetchVideosByFlow(arcFilter.rawSrc, arcFilter.rawDst) : fetchVideos()
+        ]);
+        lastFlows = fl;
+        render(geo, fl);
+        videosCache = vids;
+        if (window.renderVideoList) window.renderVideoList(videosCache);
+        
+        // Mise à jour différée du graphique (non bloquante)
+        setTimeout(async () => {
+          const series = await fetchTimelinesForVideos(videosCache, 5);
+          renderViewsChartMulti(series, null);
+        }, 100);
       });
       srcSelect.addEventListener('change', () => {
         selectedVideoId = null; selectedVideoData = null;
+        arcFilter = null; // Réinitialiser le filtre d'arc
         updateSelectedCountryHighlight(); centerOnSelectedCountry(800); refresh();
       });
       toggleModeBtn.addEventListener('click', async () => {
         mode = (mode === 'off') ? 'on' : 'off';
         toggleModeBtn.textContent = mode.toUpperCase();
         selectedVideoId = null; selectedVideoData = null;
+        arcFilter = null; // Réinitialiser le filtre d'arc
         await refresh();
       });
     }
