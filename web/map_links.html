@@ -73,6 +73,16 @@
   <script>
     const $ = s => document.querySelector(s);
     const tip = $('#tip');
+    
+    // Fonction pour convertir une date YYYY-MM-DD en format français dd/MM/yyyy
+    function formatDateFrench(dateStr) {
+      if (!dateStr) return dateStr;
+      const parts = dateStr.split('-');
+      if (parts.length === 3) {
+        return `${parts[2]}/${parts[1]}/${parts[0]}`;
+      }
+      return dateStr;
+    }
 
     const width = 980, height = 540;
     const svg = d3.select('#map').append('svg').attr('viewBox', `0 0 ${width} ${height}`).style('width','100%').style('height','100%');
@@ -87,39 +97,17 @@
     let blendT = 0;            // progression du morphing [0..1]
     let worldGeo = null;       // géo conservée pour morphing
 
+    // Fonction de comparaison simple (noms identiques entre DB et world-atlas)
     function normalizeName(s){
       if(!s) return null;
-      let k = String(s).trim().toLowerCase();
-      k = k.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-      const synonyms = {
-        'united states': 'united states of america', 'usa':'united states of america', 'etats-unis':'united states of america', 'etats unis':'united states of america',
-        'uk': 'united kingdom', 'great britain':'united kingdom', 'royaume-uni':'united kingdom', 'royaume uni':'united kingdom',
-        'russia':'russian federation', 'russie':'russian federation',
-        'south korea':'korea, republic of', "north korea":"korea, democratic people's republic of",
-        'czech republic':'czechia', 'ivory coast':"cote d'ivoire", 'swaziland':'eswatini', 'cape verde':'cabo verde', 'laos':'lao pdr',
-        'burma':'myanmar',
-        'espagne':'spain', 'allemagne':'germany', 'italie':'italy', 'pays-bas':'netherlands', 'emirats arabes unis':'united arab emirates',
-        'fra':'france', 'fr':'france',
-        'bosnia and herzegovina':'bosnia and herzegovina', 'north macedonia':'macedonia', 'liechtenstein':'liechtenstein',
-        // Variations possibles pour les pays problématiques
-        'macedonia':'north macedonia'
-      };
-      return synonyms[k] || k;
+      return String(s).trim();
     }
 
     async function loadWorld(){
       const topo = await fetch('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json').then(r=>r.json());
       const geo = topojson.feature(topo, topo.objects.countries);
       
-      // Debug: lister tous les pays disponibles (une seule fois)
-      if (!window.countriesListed) {
-        console.log('Pays disponibles dans world-atlas:');
-        geo.features.forEach(f => {
-          const name = f.properties && f.properties.name;
-          if (name) console.log(`"${name}" → normalized: "${normalizeName(name)}"`);
-        });
-        window.countriesListed = true;
-      }
+      // Chargement des pays depuis world-atlas
       
       return geo;
     }
@@ -148,6 +136,7 @@
     let filterListToSelection = false;
     let arcHover = null; // { srcKey, dstKey }
     let arcFilter = null; // { srcKey, dstKey }
+    let chartFollowSelection = true; // Quand false, ne pas toucher au graphe en lignes
 
     function flowsForSelectedVideo(){
       if (!selectedVideoData) return [];
@@ -186,6 +175,17 @@
       return js.data || [];
     }
 
+    async function fetchAllVideos(){
+      const qs = new URLSearchParams();
+      const selected = srcSelect.value;
+      if(selected){ qs.set('src', selected); }
+      if(mode){ qs.set('mode', mode); }
+      const res = await fetch(`/api/videos/all?${qs.toString()}`);
+      const js = await res.json();
+      if(!res.ok) throw new Error(js.error||'Erreur API');
+      return js.data || [];
+    }
+
     async function fetchVideosByFlow(srcKey, dstKey){
       const qs = new URLSearchParams();
       if(dates.length){
@@ -202,10 +202,11 @@
       return js.data || [];
     }
 
-    async function fetchFlowsByVideo(videoId){
+    async function fetchFlowsByVideo(videoId, includeDate = false){
       const qs = new URLSearchParams();
       if (videoId) qs.set('videoId', videoId);
-      if(dates.length){
+      // Ne filtrer par date que si explicitement demandé
+      if(includeDate && dates.length){
         const idx = +dateSlider.value || 0;
         const onDate = dates[Math.max(0, Math.min(idx, dates.length-1))];
         if(onDate) qs.set('onDate', onDate);
@@ -237,13 +238,56 @@
       return results;
     }
 
+    // Cache global des timelines pour éviter les requêtes répétées
+    let globalTimelinesCache = new Map();
+    let isPreloading = false;
+
+    async function loadMoreTimelines(vids, currentCount = 10) {
+      const allVideoIds = (vids || []).map(v => v.video_id).filter(Boolean);
+      const missingIds = allVideoIds.filter(id => !globalTimelinesCache.has(id));
+      
+      if (missingIds.length > 0) {
+        const batch = missingIds.slice(0, Math.min(currentCount, 50));
+        const newTimelines = await fetchTimelinesForVideos(batch.map(id => ({video_id: id})), batch.length);
+        newTimelines.forEach(tl => {
+          if (tl.videoId) globalTimelinesCache.set(tl.videoId, tl);
+        });
+      }
+      
+      return allVideoIds.map(id => globalTimelinesCache.get(id)).filter(Boolean);
+    }
+
+    // Préchargement en arrière-plan pour améliorer la réactivité
+    async function preloadTimelines(vids, delay = 200) {
+      if (isPreloading) return;
+      isPreloading = true;
+      
+      setTimeout(async () => {
+        try {
+          const allVideoIds = (vids || []).map(v => v.video_id).filter(Boolean);
+          const missingIds = allVideoIds.filter(id => !globalTimelinesCache.has(id));
+          
+          if (missingIds.length > 0) {
+            const batch = missingIds.slice(0, 20); // Précharger 20 de plus
+            const newTimelines = await fetchTimelinesForVideos(batch.map(id => ({video_id: id})), batch.length);
+            newTimelines.forEach(tl => {
+              if (tl.videoId) globalTimelinesCache.set(tl.videoId, tl);
+            });
+          }
+        } catch (e) {
+          console.warn('Préchargement échoué:', e);
+        }
+        isPreloading = false;
+      }, delay);
+    }
+
     function renderViewsChartMulti(seriesList, highlightVideoId = null){
       chartDiv.replaceChildren();
       // Nettoyer les infobulles existantes
       d3.selectAll('.chart-tooltip').remove();
       const list = Array.isArray(seriesList) ? seriesList : [];
       if (!list.length) return;
-      const m = {t:10, r:16, b:24, l:40};
+      const m = {t:20, r:16, b:24, l:40}; // Augmenter la marge du haut pour les labels de date
       const w = chartDiv.clientWidth || width;
       const h = chartDiv.clientHeight || 320;
       const svgC = d3.select(chartDiv).append('svg').attr('width', '100%').attr('height', '100%').attr('viewBox', `0 0 ${w} ${h}`);
@@ -263,8 +307,8 @@
         const dmax = parse(dates[dates.length-1]);
         if (dmin && dmax) x.domain([dmin, dmax]);
       }
-      const y = d3.scaleLinear().domain([0, d3.max(allPts, d => d.v)||1]).nice().range([innerH, 0]);
-      const ax = d3.axisBottom(x).ticks(5).tickSizeOuter(0).tickFormat(d3.utcFormat('%Y-%m-%d'));
+      const y = d3.scaleSqrt().domain([0, d3.max(allPts, d => d.v)||1]).nice().range([innerH, 0]);
+      const ax = d3.axisBottom(x).ticks(5).tickSizeOuter(0).tickFormat(d3.utcFormat('%d/%m/%Y'));
       const ay = d3.axisLeft(y).ticks(4).tickSize(-innerW).tickFormat(d3.format('.2s'));
       gx.append('g').attr('transform', `translate(0,${innerH})`).call(ax).selectAll('text').attr('fill', '#9ca3af');
       gx.append('g').call(ay).call(g => g.selectAll('text').attr('fill', '#9ca3af')).call(g => g.selectAll('line').attr('stroke', '#1f2937')).call(g => g.select('.domain').attr('stroke', '#1f2937'));
@@ -298,10 +342,63 @@
               .attr('fill', '#ef4444')
               .attr('font-size', '11px')
               .attr('font-weight', 'bold')
-              .text(selectedDate);
+              .text(formatDateFrench(selectedDate));
           }
         }
       }
+      
+      // Barre de référence pour le survol de la souris
+      const hoverLine = gx.append('line')
+        .attr('class', 'hover-reference-line')
+        .attr('y1', 0)
+        .attr('y2', innerH)
+        .attr('stroke', '#94a3b8')
+        .attr('stroke-width', 1)
+        .attr('stroke-dasharray', '2,2')
+        .attr('opacity', 0)
+        .style('pointer-events', 'none');
+
+      const hoverDateLabel = gx.append('text')
+        .attr('class', 'hover-reference-date')
+        .attr('y', -8)
+        .attr('text-anchor', 'middle')
+        .attr('font-size', '10px')
+        .attr('fill', '#94a3b8')
+        .attr('opacity', 0)
+        .style('pointer-events', 'none');
+
+      // Zone invisible pour capturer le survol sur tout le graphique
+      gx.append('rect')
+        .attr('class', 'hover-capture')
+        .attr('x', 0)
+        .attr('y', 0)
+        .attr('width', innerW)
+        .attr('height', innerH)
+        .attr('fill', 'transparent')
+        .style('pointer-events', 'all')
+        .on('mousemove', function(event) {
+          const [mouseX] = d3.pointer(event, this);
+          const hoveredDate = x.invert(mouseX);
+          
+          // Ajuster la position de la ligne de référence
+          const refX = x(hoveredDate);
+          hoverLine
+            .attr('x1', refX)
+            .attr('x2', refX)
+            .attr('opacity', 0.6);
+          
+          // Ajuster la position et le texte du label
+          const formatDate = d3.utcFormat('%d/%m/%Y');
+          hoverDateLabel
+            .attr('x', refX)
+            .attr('opacity', 0.8)
+            .text(formatDate(hoveredDate));
+        })
+        .on('mouseleave', function() {
+          hoverLine.attr('opacity', 0);
+          hoverDateLabel.attr('opacity', 0);
+        });
+      
       const line = d3.line().x(d => x(d.d)).y(d => y(d.v)).curve(d3.curveMonotoneX);
       
       // Créer une infobulle pour le graphique
@@ -317,9 +414,23 @@
         .style('opacity', 0)
         .style('z-index', '1000');
       
+      // Obtenir la date sélectionnée par le slider
+      const selectedDate = dates.length && dateSlider ? dates[+dateSlider.value || 0] : null;
+      const selectedDateParsed = selectedDate ? parse(selectedDate) : null;
+      
       // tracer toutes les séries
       seriesParsed.forEach(s => {
         const isHi = !!highlightVideoId && s.videoId === highlightVideoId;
+        
+        // Vérifier si cette série a un point à la date sélectionnée
+        const hasSelectedDate = selectedDateParsed ? 
+          s.pts.some(pt => Math.abs(pt.d.getTime() - selectedDateParsed.getTime()) < 24 * 60 * 60 * 1000) : 
+          false;
+        
+        // Déterminer l'opacité : 0.1 par défaut, plus visible si elle contient la date sélectionnée
+        let opacity = 0.1;
+        if (isHi) opacity = 1; // Vidéo sélectionnée = complètement visible
+        else if (hasSelectedDate) opacity = 0.6; // Contient la date du slider = visible
         
         // Ligne
         const p = gx.append('path')
@@ -328,7 +439,7 @@
           .attr('data-video-id', s.videoId)
           .attr('fill', 'none')
           .attr('stroke', '#22c55e')
-          .attr('stroke-opacity', isHi ? 1 : 0.35)
+          .attr('stroke-opacity', opacity)
           .attr('stroke-width', isHi ? 3 : 2)
           .attr('d', line);
         
@@ -345,13 +456,33 @@
           .attr('cy', d => y(d.v))
           .attr('r', isHi ? 2.5 : 2)
           .attr('fill', '#22c55e')
-          .attr('fill-opacity', isHi ? 0.7 : 0)
+          .attr('fill-opacity', 0) // Points invisibles par défaut
           .style('cursor', 'pointer')
+          .style('pointer-events', 'none') // Désactiver les événements sur les petits cercles
+          
+        // Ajouter une zone de survol invisible plus large pour chaque point
+        gx.selectAll(`.hover-area-${s.videoId}`)
+          .data(s.pts)
+          .join('circle')
+          .attr('class', `hover-area-${s.videoId} hover-area`)
+          .attr('data-video-id', s.videoId)
+          .attr('cx', d => x(d.d))
+          .attr('cy', d => y(d.v))
+          .attr('r', 8) // Zone de survol plus large (8px de rayon)
+          .attr('fill', 'transparent')
+          .attr('stroke', 'none')
+          .style('cursor', 'pointer')
+          .style('pointer-events', 'all')
           .on('mouseenter', function(event, d) {
-            // Rendre le point visible au survol
-            d3.select(this).attr('fill-opacity', 0.7);
+            // Rendre le point visible au survol (chercher le point correspondant à cette position exacte)
+            const currentDate = d.d;
+            gx.selectAll(`.point-${s.videoId}`)
+              .filter(function(pointData) {
+                return pointData.d.getTime() === currentDate.getTime();
+              })
+              .attr('fill-opacity', 0.7);
             
-            const formatDate = d3.utcFormat('%Y-%m-%d');
+            const formatDate = d3.utcFormat('%d/%m/%Y');
             const formatViews = d3.format(',');
             chartTooltip
               .style('opacity', 1)
@@ -364,32 +495,34 @@
               .style('left', (event.pageX + 10) + 'px')
               .style('top', (event.pageY - 10) + 'px');
           })
-          .on('mouseleave', function() {
-            // Rendre le point invisible quand on quitte le survol (sauf si ligne surbrillée ou vidéo sélectionnée)
-            const videoId = d3.select(this).attr('data-video-id');
-            const isHighlighted = highlightVideoId === videoId;
-            const isSelected = selectedVideoId === videoId;
-            d3.select(this).attr('fill-opacity', (isHighlighted || isSelected) ? 0.7 : 0);
+          .on('mouseleave', function(event, d) {
+            // Rendre le point invisible quand on quitte le survol
+            const currentDate = d.d;
+            gx.selectAll(`.point-${s.videoId}`)
+              .filter(function(pointData) {
+                return pointData.d.getTime() === currentDate.getTime();
+              })
+              .attr('fill-opacity', 0); // Toujours invisible au départ de la souris
             
             chartTooltip.style('opacity', 0);
           })
           .on('click', async function(event) {
-            // Même comportement de filtrage que pour les lignes
+            // Clic sur un point : filtrer SEULEMENT la liste et la carte, PAS le graphique
             const videoId = d3.select(this).attr('data-video-id');
             arcFilter = null; // Réinitialiser le filtre d'arc
             
             if (selectedVideoId === videoId) {
-              // Désélectionner => restaurer la liste complète
+              // Désélectionner => restaurer la liste complète et la carte
               selectedVideoId = null; selectedVideoData = null;
-              const fullVideos = await fetchVideos();
+              const fullVideos = await fetchAllVideos();
               videosCache = fullVideos;
               if (window.renderVideoList) window.renderVideoList(fullVideos);
               if (window.highlightSelectedVideoRow) window.highlightSelectedVideoRow();
               if (window.refreshMapOnly) await window.refreshMapOnly();
-              const series = await fetchTimelinesForVideos(fullVideos, 5);
-              renderViewsChartMulti(series, null);
+              // NE PAS toucher au graphique - il garde son état actuel
+              chartFollowSelection = false;
             } else {
-              // Sélectionner => filtrer pour cette vidéo uniquement
+              // Sélectionner => filtrer la liste et la carte pour cette vidéo
               selectedVideoId = videoId;
               selectedVideoData = (videosCache||[]).find(v => v.video_id === videoId) || null;
               
@@ -403,12 +536,11 @@
               if (window.renderVideoList) window.renderVideoList(filteredVideos);
               if (window.highlightSelectedVideoRow) window.highlightSelectedVideoRow();
               
-              // Mettre à jour la map avec les arcs de cette vidéo uniquement
+              // Mettre à jour la carte avec les flux de cette vidéo uniquement
               if (window.refreshMapOnly) await window.refreshMapOnly();
               
-              // Afficher seulement la ligne de cette vidéo dans le graphique
-              const tl = await fetchVideoViewsTimeline(selectedVideoId);
-              renderViewsChartMulti([{ videoId: selectedVideoId, data: tl }], selectedVideoId);
+              // NE PAS toucher au graphique - il reste multi-vidéos
+              chartFollowSelection = false;
             }
             
             // Empêcher la propagation pour éviter le clic sur le fond du graphique
@@ -417,13 +549,15 @@
         p.on('mouseenter', () => { setChartHighlightMany([s.videoId]); highlightVideoRowsByIds([s.videoId]); highlightMapForVideo(s.videoId); });
         p.on('mouseleave', () => { setChartHighlightMany(null); if (window.highlightSelectedVideoRow) window.highlightSelectedVideoRow(); if (!arcFilter) updateMapFlowHighlight(null); });
         p.on('click', async () => {
+          // Clic sur une ligne: le graphe doit suivre la sélection
+          chartFollowSelection = true;
           // Cliquer une série dans le graphe => filtrer tous les éléments pour cette vidéo
           arcFilter = null; // Réinitialiser le filtre d'arc
           
           if (selectedVideoId === s.videoId) {
-            // Désélectionner => restaurer la liste complète
+            // Désélectionner => restaurer la liste complète (sans filtre de date)
             selectedVideoId = null; selectedVideoData = null;
-            const fullVideos = await fetchVideos();
+            const fullVideos = await fetchAllVideos();
             videosCache = fullVideos;
             if (window.renderVideoList) window.renderVideoList(fullVideos);
             if (window.highlightSelectedVideoRow) window.highlightSelectedVideoRow();
@@ -472,10 +606,11 @@
           selectedVideoId = null; 
           selectedVideoData = null;
           arcFilter = null;
+          chartFollowSelection = true; // Le fond réactive le suivi normal du graphe
           
           (async () => {
-            // Recharger la liste complète
-            const vids = await fetchVideos();
+            // Recharger la liste complète (sans filtre de date)
+            const vids = await fetchAllVideos();
             videosCache = vids;
             if (window.renderVideoList) window.renderVideoList(vids);
             if (window.highlightSelectedVideoRow) window.highlightSelectedVideoRow();
@@ -576,10 +711,11 @@
       if (arcFilter) return;
       if (!videoId){ updateMapFlowHighlight(null); return; }
       try{
+        // Pour le survol, on peut utiliser le cache avec la date (comportement existant)
         const cacheKey = `${videoId}|${dateSlider.value}|${mode}`;
         let pairsSet = flowsByVideoCache.get(cacheKey);
         if (!pairsSet){
-          const fl = await fetchFlowsByVideo(videoId);
+          const fl = await fetchFlowsByVideo(videoId, true); // Inclure la date pour le survol
           pairsSet = new Set((fl||[]).map(e => `${normalizeName(e.src)}->${normalizeName(e.dst)}`));
           flowsByVideoCache.set(cacheKey, pairsSet);
         }
@@ -612,7 +748,7 @@
         const cacheKey = `${selId}|${dateSlider.value}|${mode}`;
         let pairsSet = flowsByVideoCache.get(cacheKey);
         if (!pairsSet){
-          const fl = await fetchFlowsByVideo(selId);
+          const fl = await fetchFlowsByVideo(selId, true); // Inclure la date pour la surbrillance
           pairsSet = new Set((fl||[]).map(e => `${normalizeName(e.src)}->${normalizeName(e.dst)}`));
           flowsByVideoCache.set(cacheKey, pairsSet);
         }
@@ -622,14 +758,7 @@
       }
     }
 
-    const anchorOverrides = {
-      // lon, lat ancrés au centre métropolitain
-      'france': [2.2137, 46.2276],
-      // Pays manquants dans world-atlas
-      'bosnia and herzegovina': [17.6791, 43.9159],
-      'north macedonia': [21.7453, 41.6086], 
-      'liechtenstein': [9.5215, 47.1410]
-    };
+    // Ancrage manuel supprimé - utilisation directe des noms de world-atlas
 
     function updateSelectedCountryHighlight(){
       const selected = (srcSelect && srcSelect.value) ? normalizeName(srcSelect.value) : null;
@@ -645,7 +774,25 @@
 
     function countryLonLat(geo, name){
       const key = normalizeName(name);
-      if (key && anchorOverrides[key]) return anchorOverrides[key];
+      
+      // Coordonnées fixes pour les pays avec territoires d'outre-mer
+      const fixedCoordinates = {
+        'France': [2.3522, 46.2276],           // Centre de la France métropolitaine
+        'United States': [-98.5795, 39.8283],  // Centre des États-Unis continentaux
+        'United Kingdom': [-3.435973, 55.378051], // Centre du Royaume-Uni
+        'Netherlands': [5.291266, 52.132633],  // Centre des Pays-Bas
+        'Denmark': [9.501785, 56.26392],       // Centre du Danemark
+        'Norway': [8.468946, 60.472024],       // Centre de la Norvège
+        'Spain': [-3.74922, 40.463667],        // Centre de l'Espagne
+        'Portugal': [-8.224454, 39.399872],    // Centre du Portugal
+      };
+      
+      // Utiliser les coordonnées fixes si disponibles
+      if (fixedCoordinates[key]) {
+        return fixedCoordinates[key];
+      }
+      
+      // Sinon utiliser le centroïde géométrique
       for(const f of geo.features){
         const nm = normalizeName(f.properties && f.properties.name);
         if(nm === key){
@@ -653,6 +800,7 @@
           return c; // [lon, lat]
         }
       }
+      
       return null;
     }
 
@@ -739,9 +887,6 @@
         const srcLL = countryLonLat(geo, d.src);
         const dstLL = countryLonLat(geo, d.dst);
         if(!srcLL || !dstLL) {
-          // Debug: afficher les pays non résolus
-          if (!srcLL) console.warn(`Pays source non trouvé: "${d.src}"`);
-          if (!dstLL) console.warn(`Pays destination non trouvé: "${d.dst}"`);
           return null;
         }
         return { srcLL, dstLL, count: d.count, views: d.views, src: d.src, dst: d.dst };
@@ -843,7 +988,7 @@
             const list = await fetchVideosByFlow(arcFilter.rawSrc, arcFilter.rawDst);
             videosCache = list;
             renderVideoList(list);
-            const series = await fetchTimelinesForVideos(list, Math.min(50, list.length));
+            const series = await fetchTimelinesForVideos(list, 10);
             renderViewsChartMulti(series, null);
             selectedVideoId = null; selectedVideoData = null; highlightSelectedVideoRow();
           }catch{}
@@ -898,7 +1043,6 @@
 
       const countryLL = (name) => {
         const key = normalizeName(name);
-        if (key && anchorOverrides[key]) return anchorOverrides[key];
         for(const f of geo.features){
           const nm = normalizeName(f.properties && f.properties.name);
           if(nm === key){ return d3.geoCentroid(f); }
@@ -998,7 +1142,7 @@
       worldGeo = geo;
       dates = (dateList && Array.isArray(dateList.dates)) ? dateList.dates : [];
       dateSlider.min = 0; dateSlider.max = Math.max(0, dates.length-1); dateSlider.value = 0;
-      dateLabel.textContent = dates.length ? dates[0] : '—';
+      dateLabel.textContent = dates.length ? formatDateFrench(dates[0]) : '—';
       // Charger les pays source
       const channels = await fetch('/api/meta/channels').then(r=>r.json()).catch(()=>({countries:[]}));
       const countries = (channels && Array.isArray(channels.countries)) ? channels.countries : [];
@@ -1116,7 +1260,7 @@
           videosCache = vids;
           renderVideoList(videosCache);
           
-          const series = await fetchTimelinesForVideos(videosCache, 5);
+          const series = await fetchTimelinesForVideos(videosCache, 10);
           renderViewsChartMulti(series, null);
           selectedVideoId = null; selectedVideoData = null;
           highlightSelectedVideoRow();
@@ -1300,24 +1444,27 @@
 
       const refresh = async () => {
         const [fl, vids] = await Promise.all([
-          selectedVideoId ? fetchFlowsByVideo(selectedVideoId) : fetchFlows(),
+          selectedVideoId ? fetchFlowsByVideo(selectedVideoId, false) : fetchFlows(),
           (arcFilter && arcFilter.rawSrc && arcFilter.rawDst) ? fetchVideosByFlow(arcFilter.rawSrc, arcFilter.rawDst) : fetchVideos()
         ]);
         lastFlows = fl;
         render(geo, fl);
         videosCache = vids;
         renderVideoList(videosCache);
-        if (selectedVideoId){
+        if (selectedVideoId && chartFollowSelection !== false){
           const tl = await fetchVideoViewsTimeline(selectedVideoId);
           renderViewsChartMulti([{ videoId: selectedVideoId, data: tl }], selectedVideoId);
         } else {
-          const series = await fetchTimelinesForVideos(videosCache, 5);
+          // Charger progressivement plus de timelines
+          const series = await loadMoreTimelines(videosCache, 15);
           renderViewsChartMulti(series, null);
+          // Précharger plus de timelines en arrière-plan
+          preloadTimelines(videosCache, 300);
         }
       };
 
       async function refreshMapOnly(){
-        const fl = await (selectedVideoId ? fetchFlowsByVideo(selectedVideoId) : fetchFlows());
+        const fl = await (selectedVideoId ? fetchFlowsByVideo(selectedVideoId, false) : fetchFlows());
         lastFlows = fl;
         render(geo, fl);
       }
@@ -1421,27 +1568,49 @@
         highlightSelectedVideoRow();
       }
       window.renderVideoList = renderVideoList;
+      // Debounce pour optimiser les mises à jour du slider
+      let sliderTimeout = null;
+      
       // Source fixe: yt_clean (pas d'écouteur de changement de table)
       dateSlider.addEventListener('input', async ()=>{
-        dateLabel.textContent = dates.length ? dates[+dateSlider.value] : '—';
-        selectedVideoId = null; selectedVideoData = null;
-        arcFilter = null; // Réinitialiser le filtre d'arc
+        // Mise à jour immédiate du label
+        dateLabel.textContent = dates.length ? formatDateFrench(dates[+dateSlider.value]) : '—';
         
-        // Mise à jour immédiate de la map et de la liste
-        const [fl, vids] = await Promise.all([
-          selectedVideoId ? fetchFlowsByVideo(selectedVideoId) : fetchFlows(),
-          (arcFilter && arcFilter.rawSrc && arcFilter.rawDst) ? fetchVideosByFlow(arcFilter.rawSrc, arcFilter.rawDst) : fetchVideos()
-        ]);
-        lastFlows = fl;
-        render(geo, fl);
-        videosCache = vids;
-        if (window.renderVideoList) window.renderVideoList(videosCache);
+        // Annuler la mise à jour précédente si elle est en attente
+        if (sliderTimeout) {
+          clearTimeout(sliderTimeout);
+        }
         
-        // Mise à jour différée du graphique (non bloquante)
-        setTimeout(async () => {
-          const series = await fetchTimelinesForVideos(videosCache, 5);
+        // Programmer la mise à jour avec un délai minimal pour le debounce
+        sliderTimeout = setTimeout(async () => {
+          // NE PAS réinitialiser selectedVideoId si une vidéo est sélectionnée par clic
+          // selectedVideoId = null; selectedVideoData = null;
+          arcFilter = null; // Réinitialiser le filtre d'arc
+          
+          // Si une vidéo est sélectionnée, ne pas changer la liste/graphique
+          if (selectedVideoId) {
+            // Seulement mettre à jour la map avec les nouveaux flux
+            const fl = await fetchFlows();
+            lastFlows = fl;
+            render(geo, fl);
+            return; // Garder la vidéo sélectionnée et son graphique
+          }
+          
+          // Mise à jour normale seulement si aucune vidéo n'est sélectionnée
+          const [fl, vids] = await Promise.all([
+            fetchFlows(),
+            fetchVideos()
+          ]);
+          lastFlows = fl;
+          render(geo, fl);
+          videosCache = vids;
+          if (window.renderVideoList) window.renderVideoList(videosCache);
+          
+          // Mise à jour du graphique avec les nouvelles données de la date sélectionnée
+          // Recharger les timelines pour les vidéos de cette date spécifique
+          const series = await loadMoreTimelines(videosCache, 15);
           renderViewsChartMulti(series, null);
-        }, 100);
+        }, 50); // Débounce de 50ms pour une réactivité optimale
       });
       srcSelect.addEventListener('change', () => {
         selectedVideoId = null; selectedVideoData = null;

@@ -73,11 +73,14 @@
         <div class="content">
           <div class="controls">
             <button class="primary" id="btnRun">Exécuter (Ctrl+Enter)</button>
+            <button class="danger" id="btnUpdate" style="display:none">Exécuter UPDATE</button>
             <select id="examples">
               <option value="">Exemples...</option>
-              <option value="select video_id, video_trending_country, video_trending_date, count(*) from yt_clean group by all order by count(*) desc;">select video_id, video_trending_country, video_trending_date, count(*) from yt_clean group by all order by count(*) desc;</option>
+              <option value="SELECT video_id, video_title, channel_country, video_trending_country, video_trending_date, video_view_count FROM yt_clean where video_title like 'Champion !%';">Infos sur une vidéo</option>
               <option value="SELECT channelTitle, COUNT(*) AS videos FROM youtube GROUP BY 1 ORDER BY videos DESC LIMIT 20;">Top 20 chaînes par nombre de vidéos</option>
-              <option value="SELECT categoryId, COUNT(*) AS n FROM youtube GROUP BY 1 ORDER BY n DESC;">Répartition par catégorie</option>
+              <option value="UPDATE yt_clean SET video_title = 'Nouveau titre' WHERE video_id = 'VOTRE_VIDEO_ID';">Exemple UPDATE</option>
+              <option value="INSERT INTO yt_clean (video_id, video_title) VALUES ('test123', 'Vidéo test');">Exemple INSERT</option>
+              <option value="DELETE FROM yt_clean WHERE video_id = 'VOTRE_VIDEO_ID';">Exemple DELETE</option>
             </select>
             <label class="muted">Max lignes <input type="number" id="maxRows" value="500" min="1" max="50000" style="width:90px" /></label>
           </div>
@@ -93,7 +96,7 @@ LIMIT 50;</textarea>
         <div class="title">Résultats</div>
         <div class="content">
           <div class="table-wrap"><table id="result"></table></div>
-          <div class="footer">Astuce: seules les requêtes SELECT/WITH sont autorisées côté serveur.</div>
+          <div class="footer">Astuce: utilisez SELECT/WITH pour consulter les données, UPDATE/INSERT/DELETE pour les modifier. Les modifications nécessitent une confirmation.</div>
         </div>
       </section>
     </div>
@@ -102,6 +105,7 @@ LIMIT 50;</textarea>
   <script>
     const $ = (sel) => document.querySelector(sel);
     const btnRun = $('#btnRun');
+    const btnUpdate = $('#btnUpdate');
     const btnClear = $('#btnClear');
     const ta = $('#sql');
     const tbl = $('#result');
@@ -145,6 +149,42 @@ LIMIT 50;</textarea>
       tbl.replaceChildren(thead, tbody);
     }
 
+    function renderUpdateResult(message, rowsAffected, elapsedMs) {
+      const thead = document.createElement('thead');
+      const trh = document.createElement('tr');
+      const th = document.createElement('th');
+      th.textContent = 'Résultat de la modification';
+      trh.appendChild(th);
+      thead.appendChild(trh);
+
+      const tbody = document.createElement('tbody');
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.textContent = message;
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+
+      tbl.replaceChildren(thead, tbody);
+    }
+
+    function isUpdateQuery(sql) {
+      const normalized = sql.trim().toLowerCase();
+      return normalized.startsWith('update ') || 
+             normalized.startsWith('insert ') || 
+             normalized.startsWith('delete ');
+    }
+
+    function updateButtonVisibility() {
+      const sql = ta.value.trim();
+      if (isUpdateQuery(sql)) {
+        btnRun.style.display = 'none';
+        btnUpdate.style.display = 'inline-block';
+      } else {
+        btnRun.style.display = 'inline-block';
+        btnUpdate.style.display = 'none';
+      }
+    }
+
     async function runQuery() {
       const sql = ta.value.trim();
       if (!sql) return;
@@ -174,21 +214,65 @@ LIMIT 50;</textarea>
       }
     }
 
+    async function runUpdate() {
+      const sql = ta.value.trim();
+      if (!sql) return;
+      if (!confirm('Êtes-vous sûr de vouloir exécuter cette commande de modification ?')) {
+        return;
+      }
+      clearError();
+      setStatus('Exécution de la modification...');
+      btnUpdate.disabled = true;
+      try {
+        const res = await fetch('/api/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sql })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          showError(data && data.error ? data.error : 'Erreur inconnue');
+          setStatus('Échec');
+          return;
+        }
+        renderUpdateResult(data.message, data.rowsAffected, data.elapsedMs);
+        setStatus(`${data.message} - ${data.elapsedMs} ms`);
+      } catch (e) {
+        showError(String(e));
+        setStatus('Échec');
+      } finally {
+        btnUpdate.disabled = false;
+      }
+    }
+
     btnRun.addEventListener('click', runQuery);
+    btnUpdate.addEventListener('click', runUpdate);
     btnClear.addEventListener('click', () => { tbl.replaceChildren(); setStatus(''); clearError(); });
     ta.addEventListener('keydown', (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-        runQuery();
+        if (isUpdateQuery(ta.value.trim())) {
+          runUpdate();
+        } else {
+          runQuery();
+        }
       }
     });
+    ta.addEventListener('input', updateButtonVisibility);
     examples.addEventListener('change', () => {
       const v = examples.value;
-      if (v) { ta.value = v; }
+      if (v) { 
+        ta.value = v; 
+        updateButtonVisibility();
+      }
       examples.selectedIndex = 0;
     });
 
-    // Exécution initiale
-    runQuery();
+    // Initialisation
+    updateButtonVisibility();
+    // Exécution initiale seulement si c'est une requête SELECT
+    if (!isUpdateQuery(ta.value.trim())) {
+      runQuery();
+    }
   </script>
 </body>
 <!--

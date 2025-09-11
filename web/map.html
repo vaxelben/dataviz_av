@@ -62,6 +62,16 @@
   <script>
     const $ = sel => document.querySelector(sel);
     const tip = $('#tip');
+    
+    // Fonction pour convertir une date YYYY-MM-DD en format français dd/MM/yyyy
+    function formatDateFrench(dateStr) {
+      if (!dateStr) return dateStr;
+      const parts = dateStr.split('-');
+      if (parts.length === 3) {
+        return `${parts[2]}/${parts[1]}/${parts[0]}`;
+      }
+      return dateStr;
+    }
     const wrap = $('#map-wrap');
     const maxv = $('#maxv');
     let dates = [];
@@ -157,13 +167,13 @@
       ]);
       dates = (dateList && Array.isArray(dateList.dates)) ? dateList.dates : [];
       dateSlider.min = 0; dateSlider.max = Math.max(0, dates.length-1); dateSlider.value = Math.max(0, dates.length-1);
-      dateLabel.textContent = dates.length ? dates[+dateSlider.value] : '—';
+      dateLabel.textContent = dates.length ? formatDateFrench(dates[+dateSlider.value]) : '—';
       const agg = await fetchAgg();
       render(geo, agg);
       // listeners
       // Source fixe: yt_clean (pas d'écouteur de changement de table)
       dateSlider.addEventListener('input', async ()=>{
-        dateLabel.textContent = dates.length ? dates[+dateSlider.value] : '—';
+        dateLabel.textContent = dates.length ? formatDateFrench(dates[+dateSlider.value]) : '—';
         const a = await fetchAgg(); render(geo, a);
       });
     }

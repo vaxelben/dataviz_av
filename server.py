@@ -60,6 +60,42 @@ def is_select_only(sql: str) -> bool:
     return True
 
 
+def is_update_allowed(sql: str) -> bool:
+    """Vérifie si une requête UPDATE est autorisée (sécurité basique)."""
+    if not sql:
+        return False
+    
+    # Nettoyer et normaliser la requête (gérer les retours à la ligne)
+    # Remplacer tous les espaces blancs (espaces, tabs, retours à la ligne) par un seul espace
+    normalized = " ".join(sql.strip().split()).lower()
+    
+    # Autoriser UPDATE, INSERT, DELETE
+    allowed_starts = ("update ", "insert ", "delete ")
+    if not any(normalized.startswith(start) for start in allowed_starts):
+        return False
+    
+    # Interdire certaines opérations dangereuses
+    forbidden_keywords = [
+        "drop", "create", "alter", "attach", "pragma", "call", 
+        "grant", "revoke", "vacuum", "checkpoint", "load", 
+        "reset", "use"
+    ]
+    
+    # Vérifier les mots interdits dans toute la requête
+    words = normalized.split()
+    for word in words:
+        # Nettoyer le mot des caractères de ponctuation
+        clean_word = word.strip("();,")
+        if clean_word in forbidden_keywords:
+            return False
+    
+    # Autoriser point-virgule final, mais pas plusieurs instructions
+    if normalized.count(";") > 1:
+        return False
+    
+    return True
+
+
 def run_select(db_path: Path, sql: str, max_rows: int = 1000) -> Tuple[List[str], List[Tuple], bool, float]:
     start = time.perf_counter()
     # read_only=True empêche toute modification du fichier DB
@@ -74,6 +110,22 @@ def run_select(db_path: Path, sql: str, max_rows: int = 1000) -> Tuple[List[str]
             truncated = True
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         return columns, rows, truncated, elapsed_ms
+    finally:
+        con.close()
+
+
+def run_update(db_path: Path, sql: str) -> Tuple[int, float]:
+    """Exécute une requête UPDATE/INSERT/DELETE et retourne le nombre de lignes affectées."""
+    start = time.perf_counter()
+    # read_only=False pour permettre les modifications
+    con = duckdb.connect(str(db_path), read_only=False)
+    try:
+        cur = con.execute(sql)
+        # Récupérer le nombre de lignes affectées
+        rows_affected = cur.rowcount if cur.rowcount is not None else 0
+        con.commit()
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        return rows_affected, elapsed_ms
     finally:
         con.close()
 
@@ -119,6 +171,30 @@ def api_query():
                 "rowCount": len(rows),
                 "truncated": truncated,
                 "elapsedMs": round(elapsed_ms, 2),
+            }
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/update", methods=["POST"])
+def api_update():
+    """Endpoint pour exécuter des commandes UPDATE/INSERT/DELETE."""
+    data = request.get_json(silent=True) or {}
+    sql = data.get("sql", "")
+    db_path = Path(data.get("db") or DEFAULT_DB)
+
+    if not db_path.exists():
+        return jsonify({"error": f"Base DuckDB introuvable: {db_path}"}), 400
+    if not is_update_allowed(sql):
+        return jsonify({"error": "Seules les requêtes UPDATE/INSERT/DELETE sont autorisées."}), 400
+    try:
+        rows_affected, elapsed_ms = run_update(db_path, sql)
+        return jsonify(
+            {
+                "rowsAffected": rows_affected,
+                "elapsedMs": round(elapsed_ms, 2),
+                "message": f"{rows_affected} ligne(s) affectée(s)"
             }
         )
     except Exception as e:
@@ -413,6 +489,68 @@ def api_meta_channels():
         return jsonify({"countries": countries})
     except Exception:
         return jsonify({"countries": []})
+
+
+@app.route("/api/videos/all", methods=["GET"])
+def api_videos_all():
+    """Retourne toutes les vidéos uniques de la base de données, sans filtre de date.
+    
+    Paramètres: src=channel_country (optionnel), mode (on/off), table (défaut: yt_clean)
+    Réponse: { data: [{ video_id, video_title, views, likes, src, dst }], rowCount }
+    """
+    db_path = Path(request.args.get("db") or DEFAULT_DB)
+    table = request.args.get("table", "yt_clean")
+    try:
+        table = validate_identifier(table)
+    except Exception as e:
+        return jsonify({"error": f"Nom de table invalide: {e}"}), 400
+
+    src = (request.args.get("src") or "").strip()
+    mode = (request.args.get("mode") or "").strip().lower()
+
+    if not db_path.exists():
+        return jsonify({"error": f"Base DuckDB introuvable: {db_path}"}), 400
+
+    where_parts = ["1=1"]  # Pas de filtre de date
+    if src:
+        esc = src.replace("'", "''").lower()
+        where_parts.append(f"lower(channel_country) = '{esc}'")
+    if mode in ("on", "international"):
+        where_parts.append("lower(trim(channel_country)) <> lower(trim(video_trending_country))")
+    elif mode in ("off", "domestic", ""):
+        where_parts.append("lower(trim(channel_country)) = lower(trim(video_trending_country))")
+    where_sql = " AND ".join(where_parts)
+
+    sql = f"""
+        SELECT
+          video_id,
+          COALESCE(video_title, '') AS video_title,
+          COALESCE(try_cast(regexp_replace(CAST(video_view_count AS VARCHAR), '[^0-9]', '') AS BIGINT), 0) AS views,
+          COALESCE(try_cast(regexp_replace(CAST(video_like_count AS VARCHAR), '[^0-9]', '') AS BIGINT), 0) AS likes,
+          channel_country AS src,
+          video_trending_country AS dst
+        FROM {table}
+        WHERE {where_sql}
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY views DESC) = 1
+        ORDER BY views DESC
+        LIMIT 2000
+    """
+    try:
+        cols, rows, _, _ = run_select(db_path, sql, max_rows=3000)
+        data = [
+            {
+                "video_id": r[0],
+                "video_title": r[1],
+                "views": int(r[2]) if r[2] is not None else 0,
+                "likes": int(r[3]) if r[3] is not None else 0,
+                "src": r[4],
+                "dst": r[5],
+            }
+            for r in rows
+        ]
+        return jsonify({"data": data, "rowCount": len(data)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
 
 
 @app.route("/api/videos", methods=["GET"])
