@@ -413,11 +413,77 @@
         .style('pointer-events', 'none')
         .style('opacity', 0)
         .style('z-index', '1000');
+
+      const svgNode = svgC.node();
+      function positionChartTooltip(pageX, pageY){
+        if (!svgNode) return;
+        const rect = svgNode.getBoundingClientRect();
+        const ttEl = chartTooltip.node();
+        if (!ttEl) return;
+        const padding = 8; // marge aux bords du SVG
+        const cursorMarginX = 16; // marge horizontale depuis le curseur
+        const cursorMarginY = 14; // marge verticale depuis le curseur
+        const scrollX = window.pageXOffset || document.documentElement.scrollLeft || 0;
+        const scrollY = window.pageYOffset || document.documentElement.scrollTop || 0;
+        const svgLeft = rect.left + scrollX;
+        const svgTop = rect.top + scrollY;
+        const svgRight = rect.right + scrollX;
+        const svgBottom = rect.bottom + scrollY;
+        const ttW = ttEl.offsetWidth || 0;
+        const ttH = ttEl.offsetHeight || 0;
+        // Position préférée: en bas à droite du curseur, avec marge de sécurité
+        let left = pageX + cursorMarginX;
+        let top = pageY + cursorMarginY;
+        // Flip horizontal si dépassement à droite
+        if (left + ttW + padding > svgRight) {
+          left = pageX - ttW - cursorMarginX;
+        }
+        // Flip vertical si dépassement en bas
+        if (top + ttH + padding > svgBottom) {
+          top = pageY - ttH - cursorMarginY;
+        }
+        // Clamp final aux limites du SVG
+        if (left < svgLeft + padding) left = svgLeft + padding;
+        if (top < svgTop + padding) top = svgTop + padding;
+        if (left + ttW + padding > svgRight) left = svgRight - ttW - padding;
+        if (top + ttH + padding > svgBottom) top = svgBottom - ttH - padding;
+        chartTooltip.style('left', left + 'px').style('top', top + 'px');
+      }
       
       // Obtenir la date sélectionnée par le slider
       const selectedDate = dates.length && dateSlider ? dates[+dateSlider.value || 0] : null;
       const selectedDateParsed = selectedDate ? parse(selectedDate) : null;
       
+      // Fonction commune: appliquer le même filtrage qu'au clic sur une ligne
+      async function applyVideoSelection(clickedVideoId){
+        chartFollowSelection = true;
+        arcFilter = null;
+        if (selectedVideoId === clickedVideoId) {
+          // Désélection -> restaurer la liste selon les filtres courants (date/src/mode) et graphe multi
+          selectedVideoId = null; selectedVideoData = null;
+          const vids = await fetchVideos();
+          videosCache = vids;
+          if (window.renderVideoList) window.renderVideoList(vids);
+          if (window.highlightSelectedVideoRow) window.highlightSelectedVideoRow();
+          if (window.refreshMapOnly) await window.refreshMapOnly();
+          const series = await fetchTimelinesForVideos(vids, 20);
+          renderViewsChartMulti(series, null);
+        } else {
+          // Sélection -> filtrer pour cette vidéo
+          selectedVideoId = clickedVideoId;
+          selectedVideoData = (videosCache||[]).find(v => v.video_id === clickedVideoId) || null;
+          if (!selectedVideoData) {
+            selectedVideoData = { video_id: clickedVideoId, video_title: `Vidéo ${clickedVideoId}` };
+          }
+          const filteredVideos = [selectedVideoData];
+          if (window.renderVideoList) window.renderVideoList(filteredVideos);
+          if (window.highlightSelectedVideoRow) window.highlightSelectedVideoRow();
+          if (window.refreshMapOnly) await window.refreshMapOnly();
+          const tl = await fetchVideoViewsTimeline(selectedVideoId);
+          renderViewsChartMulti([{ videoId: selectedVideoId, data: tl }], selectedVideoId);
+        }
+      }
+
       // tracer toutes les séries
       seriesParsed.forEach(s => {
         const isHi = !!highlightVideoId && s.videoId === highlightVideoId;
@@ -487,13 +553,10 @@
             chartTooltip
               .style('opacity', 1)
               .html(`<strong>ID:</strong> ${s.videoId}<br/><strong>${videoTitle}</strong><br/>Date: ${formatDate(d.d)}<br/>Vues: ${formatViews(d.v)}`)
-              .style('left', (event.pageX + 10) + 'px')
-              .style('top', (event.pageY - 10) + 'px');
+            positionChartTooltip(event.pageX, event.pageY);
           })
           .on('mousemove', function(event) {
-            chartTooltip
-              .style('left', (event.pageX + 10) + 'px')
-              .style('top', (event.pageY - 10) + 'px');
+            positionChartTooltip(event.pageX, event.pageY);
           })
           .on('mouseleave', function(event, d) {
             // Rendre le point invisible quand on quitte le survol
@@ -507,86 +570,15 @@
             chartTooltip.style('opacity', 0);
           })
           .on('click', async function(event) {
-            // Clic sur un point : filtrer SEULEMENT la liste et la carte, PAS le graphique
+            // Empêcher immédiatement la propagation pour éviter le handler de fond
+            if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+            if (event && typeof event.preventDefault === 'function') event.preventDefault();
             const videoId = d3.select(this).attr('data-video-id');
-            arcFilter = null; // Réinitialiser le filtre d'arc
-            
-            if (selectedVideoId === videoId) {
-              // Désélectionner => restaurer la liste complète et la carte
-              selectedVideoId = null; selectedVideoData = null;
-              const fullVideos = await fetchAllVideos();
-              videosCache = fullVideos;
-              if (window.renderVideoList) window.renderVideoList(fullVideos);
-              if (window.highlightSelectedVideoRow) window.highlightSelectedVideoRow();
-              if (window.refreshMapOnly) await window.refreshMapOnly();
-              // NE PAS toucher au graphique - il garde son état actuel
-              chartFollowSelection = false;
-            } else {
-              // Sélectionner => filtrer la liste et la carte pour cette vidéo
-              selectedVideoId = videoId;
-              selectedVideoData = (videosCache||[]).find(v => v.video_id === videoId) || null;
-              
-              // Si la vidéo n'est pas trouvée dans videosCache, la créer
-              if (!selectedVideoData) {
-                selectedVideoData = { video_id: videoId, video_title: `Vidéo ${videoId}` };
-              }
-              
-              // Filtrer la liste pour ne montrer que cette vidéo
-              const filteredVideos = [selectedVideoData];
-              if (window.renderVideoList) window.renderVideoList(filteredVideos);
-              if (window.highlightSelectedVideoRow) window.highlightSelectedVideoRow();
-              
-              // Mettre à jour la carte avec les flux de cette vidéo uniquement
-              if (window.refreshMapOnly) await window.refreshMapOnly();
-              
-              // NE PAS toucher au graphique - il reste multi-vidéos
-              chartFollowSelection = false;
-            }
-            
-            // Empêcher la propagation pour éviter le clic sur le fond du graphique
-            event.stopPropagation();
+            await applyVideoSelection(videoId);
           });
         p.on('mouseenter', () => { setChartHighlightMany([s.videoId]); highlightVideoRowsByIds([s.videoId]); highlightMapForVideo(s.videoId); });
         p.on('mouseleave', () => { setChartHighlightMany(null); if (window.highlightSelectedVideoRow) window.highlightSelectedVideoRow(); if (!arcFilter) updateMapFlowHighlight(null); });
-        p.on('click', async () => {
-          // Clic sur une ligne: le graphe doit suivre la sélection
-          chartFollowSelection = true;
-          // Cliquer une série dans le graphe => filtrer tous les éléments pour cette vidéo
-          arcFilter = null; // Réinitialiser le filtre d'arc
-          
-          if (selectedVideoId === s.videoId) {
-            // Désélectionner => restaurer la liste complète (sans filtre de date)
-            selectedVideoId = null; selectedVideoData = null;
-            const fullVideos = await fetchAllVideos();
-            videosCache = fullVideos;
-            if (window.renderVideoList) window.renderVideoList(fullVideos);
-            if (window.highlightSelectedVideoRow) window.highlightSelectedVideoRow();
-            if (window.refreshMapOnly) await window.refreshMapOnly();
-            const series = await fetchTimelinesForVideos(fullVideos, 20);
-            renderViewsChartMulti(series, null);
-          } else {
-            // Sélectionner => filtrer pour cette vidéo uniquement
-            selectedVideoId = s.videoId;
-            selectedVideoData = (videosCache||[]).find(v => v.video_id === s.videoId) || null;
-            
-            // Si la vidéo n'est pas trouvée dans videosCache, la créer
-            if (!selectedVideoData) {
-              selectedVideoData = { video_id: s.videoId, video_title: `Vidéo ${s.videoId}` };
-            }
-            
-            // Filtrer la liste pour ne montrer que cette vidéo
-            const filteredVideos = [selectedVideoData];
-            if (window.renderVideoList) window.renderVideoList(filteredVideos);
-            if (window.highlightSelectedVideoRow) window.highlightSelectedVideoRow();
-            
-            // Mettre à jour la map avec les arcs de cette vidéo uniquement
-            if (window.refreshMapOnly) await window.refreshMapOnly();
-            
-            // Afficher seulement la ligne de cette vidéo dans le graphique
-            const tl = await fetchVideoViewsTimeline(selectedVideoId);
-            renderViewsChartMulti([{ videoId: selectedVideoId, data: tl }], selectedVideoId);
-          }
-        });
+        p.on('click', async () => { await applyVideoSelection(s.videoId); });
       });
       
       // Ajouter un gestionnaire de clic sur le fond du graphique pour supprimer les filtres
@@ -609,8 +601,8 @@
           chartFollowSelection = true; // Le fond réactive le suivi normal du graphe
           
           (async () => {
-            // Recharger la liste complète (sans filtre de date)
-            const vids = await fetchAllVideos();
+            // Recharger la liste selon les filtres courants (date/src/mode)
+            const vids = await fetchVideos();
             videosCache = vids;
             if (window.renderVideoList) window.renderVideoList(vids);
             if (window.highlightSelectedVideoRow) window.highlightSelectedVideoRow();
@@ -908,6 +900,7 @@
         }
       };
 
+      // Chemin visible des arcs (sans gestion d'événements)
       g.selectAll('path.flow').data(arcs).join('path')
         .attr('class', 'flow')
         .attr('data-src-key', d => normalizeName(d.src))
@@ -941,13 +934,46 @@
             return `M${x1},${y1} Q${cx},${cy} ${x2},${y2}`;
           }
         })
+        .style('pointer-events', 'none');
+
+      // Calque d'interaction élargi pour faciliter le survol et le clic
+      g.selectAll('path.flow-hit').data(arcs).join('path')
+        .attr('class', 'flow-hit')
+        .attr('fill', 'none')
+        .attr('stroke', '#000')
+        .attr('stroke-opacity', 0)
+        .attr('stroke-width', d => (stroke(d.count||0) + 3))
+        .attr('d', d => {
+          if (projectionMode === 'globe'){
+            const interpolate = d3.geoInterpolate(d.srcLL, d.dstLL);
+            const dist = d3.geoDistance(d.srcLL, d.dstLL);
+            const steps = Math.max(8, Math.ceil(dist * 32));
+            const coords = d3.range(steps + 1).map(t => interpolate(t/steps));
+            const line = { type:'LineString', coordinates: coords };
+            return path(line) || null;
+          } else {
+            const a = projection(d.srcLL);
+            const b = projection(d.dstLL);
+            const [x1,y1] = a, [x2,y2] = b;
+            const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+            const dx = x2 - x1, dy = y2 - y1;
+            const norm = Math.sqrt(dx*dx + dy*dy) || 1;
+            const base = Math.min(80, norm * 0.3);
+            const horiz = Math.abs(dx) / norm;
+            const off = base * horiz;
+            let px = -dy / norm, py = dx / norm; // perpendiculaire +90°
+            if (py > 0) { px = -px; py = -py; } // garantir une composante y négative (vers le haut)
+            const cx = mx + px * off;
+            const cy = my + py * off;
+            return `M${x1},${y1} Q${cx},${cy} ${x2},${y2}`;
+          }
+        })
+        .style('pointer-events', 'stroke')
         .on('mouseenter', (ev, d) => {
           const key = normalizeName(d.dst);
           setHighlight(key);
           arcHover = { srcKey: normalizeName(d.src), dstKey: normalizeName(d.dst), rawSrc: d.src, rawDst: d.dst };
-          // surbrillance côté graphe/liste pour TOUTES les vidéos correspondantes
           (async () => {
-            // récupérer toutes les vidéos du couple src/dst pour la date/mode et surligner
             try{
               const qs = new URLSearchParams();
               if (dates.length){ const idx = +dateSlider.value||0; const onDate = dates[Math.max(0, Math.min(idx, dates.length-1))]; if (onDate) qs.set('onDate', onDate); }
@@ -980,10 +1006,8 @@
           highlightSelectedVideoRow();
         })
         .on('click', async (ev, d) => {
-          // clic sur arc => activer filtre
           arcFilter = { srcKey: normalizeName(d.src), dstKey: normalizeName(d.dst), rawSrc: d.src, rawDst: d.dst };
           render(worldGeo, lastFlows);
-          // filtrer la liste et le graphe avec les vidéos de cet arc
           try{
             const list = await fetchVideosByFlow(arcFilter.rawSrc, arcFilter.rawDst);
             videosCache = list;
@@ -1490,7 +1514,7 @@
         // En-tête
         const header = document.createElement('div');
         header.style.display = 'grid';
-        header.style.gridTemplateColumns = 'auto 1fr auto auto';
+        header.style.gridTemplateColumns = 'auto 1fr auto auto auto';
         header.style.gap = '8px';
         header.style.position = 'sticky';
         header.style.top = '0';
@@ -1501,17 +1525,18 @@
         const hTitle = document.createElement('div');
         const hViews = document.createElement('div');
         const hLikes = document.createElement('div');
+        const hLink = document.createElement('div'); hLink.textContent = 'Lien'; hLink.style.color = '#9ca3af';
         const iTitle = document.createElement('img'); iTitle.src = '/public/img/youtube_24p.svg'; iTitle.width = 18; iTitle.height = 18; iTitle.alt = 'YouTube'; iTitle.style.opacity = '0.9';
         const iViews = document.createElement('img'); iViews.src = '/public/img/views_24p.svg'; iViews.width = 18; iViews.height = 18; iViews.alt = 'Vues'; iViews.style.opacity = '0.8';
         const iLikes = document.createElement('img'); iLikes.src = '/public/img/thumbs_up_24p.svg'; iLikes.width = 18; iLikes.height = 18; iLikes.alt = 'Likes'; iLikes.style.opacity = '0.8';
         hTitle.appendChild(iTitle); hViews.appendChild(iViews); hLikes.appendChild(iLikes);
-        header.appendChild(hRank); header.appendChild(hTitle); header.appendChild(hViews); header.appendChild(hLikes);
+        header.appendChild(hRank); header.appendChild(hTitle); header.appendChild(hViews); header.appendChild(hLikes); header.appendChild(hLink);
 
         // Lignes
         const rows = vids.map((v, i) => {
           const row = document.createElement('div');
           row.style.display = 'grid';
-          row.style.gridTemplateColumns = 'auto 1fr auto auto';
+          row.style.gridTemplateColumns = 'auto 1fr auto auto auto';
           row.style.gap = '8px';
           row.style.cursor = 'pointer';
           row.dataset.videoId = v.video_id;
@@ -1526,9 +1551,19 @@
           views.textContent = fmtNum(v.views||0);
           views.style.color = '#9ca3af';
           const likes = document.createElement('div');
+          const linkCell = document.createElement('div');
+          const a = document.createElement('a');
+          a.href = `https://www.youtube.com/watch?v=${encodeURIComponent(v.video_id||'')}`;
+          a.textContent = 'Ouvrir';
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+          a.style.color = 'inherit';
+          a.style.textDecoration = 'underline';
+          a.addEventListener('click', (ev) => { ev.stopPropagation(); });
+          linkCell.appendChild(a);
           likes.textContent = fmtNum(v.likes||0);
           likes.style.color = '#9ca3af';
-          row.appendChild(rank); row.appendChild(title); row.appendChild(views); row.appendChild(likes);
+          row.appendChild(rank); row.appendChild(title); row.appendChild(views); row.appendChild(likes); row.appendChild(linkCell);
           row.addEventListener('mouseenter', () => { 
             setChartHighlight(v.video_id); 
             highlightMapForVideo(v.video_id);

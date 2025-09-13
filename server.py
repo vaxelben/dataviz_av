@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import os
 import time
+import datetime
+import decimal
 from pathlib import Path
 import re
 from typing import List, Sequence, Tuple
@@ -164,10 +166,27 @@ def api_query():
         return jsonify({"error": "Seules les requêtes SELECT/WITH sont autorisées."}), 400
     try:
         cols, rows, truncated, elapsed_ms = run_select(db_path, sql, max_rows=max_rows)
+
+        def _to_json_safe(value):
+            # Convertit les types non JSON en chaînes lisibles
+            if value is None:
+                return None
+            if isinstance(value, (str, int, float, bool)):
+                return value
+            if isinstance(value, (datetime.date, datetime.datetime, datetime.time)):
+                # Utiliser ISO 8601
+                return value.isoformat()
+            if isinstance(value, decimal.Decimal):
+                # Préserver la précision en chaîne
+                return str(value)
+            # Fallback générique
+            return str(value)
+
+        safe_rows = [[_to_json_safe(cell) for cell in row] for row in rows]
         return jsonify(
             {
                 "columns": cols,
-                "rows": rows,
+                "rows": safe_rows,
                 "rowCount": len(rows),
                 "truncated": truncated,
                 "elapsedMs": round(elapsed_ms, 2),
