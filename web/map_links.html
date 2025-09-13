@@ -32,6 +32,9 @@
     .country.hl{ fill:#162033; stroke:#22c55e; stroke-width:1.0; }
     .country.sel{ fill:#22c55ea5; }
     .country.dst{ fill:#22c55e30; }
+    /* Icône de lien bleu clair par défaut, plus bleue au survol */
+    .link-icon{ filter: hue-rotate(200deg) saturate(180%) brightness(1.0); opacity: .9; transition: filter .15s ease, opacity .15s ease; }
+    a:hover .link-icon{ filter: hue-rotate(200deg) saturate(280%) brightness(1.08); opacity: 1; }
   </style>
 </head>
 <body>
@@ -1525,7 +1528,9 @@
         const hTitle = document.createElement('div');
         const hViews = document.createElement('div');
         const hLikes = document.createElement('div');
-        const hLink = document.createElement('div'); hLink.textContent = 'Lien'; hLink.style.color = '#9ca3af';
+        const hLink = document.createElement('div');
+        const iLink = document.createElement('img'); iLink.src = '/public/img/media_link_24p.svg'; iLink.width = 18; iLink.height = 18; iLink.alt = 'Lien'; iLink.style.opacity = '0.8';
+        hLink.appendChild(iLink);
         const iTitle = document.createElement('img'); iTitle.src = '/public/img/youtube_24p.svg'; iTitle.width = 18; iTitle.height = 18; iTitle.alt = 'YouTube'; iTitle.style.opacity = '0.9';
         const iViews = document.createElement('img'); iViews.src = '/public/img/views_24p.svg'; iViews.width = 18; iViews.height = 18; iViews.alt = 'Vues'; iViews.style.opacity = '0.8';
         const iLikes = document.createElement('img'); iLikes.src = '/public/img/thumbs_up_24p.svg'; iLikes.width = 18; iLikes.height = 18; iLikes.alt = 'Likes'; iLikes.style.opacity = '0.8';
@@ -1554,12 +1559,18 @@
           const linkCell = document.createElement('div');
           const a = document.createElement('a');
           a.href = `https://www.youtube.com/watch?v=${encodeURIComponent(v.video_id||'')}`;
-          a.textContent = 'Ouvrir';
           a.target = '_blank';
           a.rel = 'noopener noreferrer';
           a.style.color = 'inherit';
-          a.style.textDecoration = 'underline';
+          a.style.textDecoration = 'none';
           a.addEventListener('click', (ev) => { ev.stopPropagation(); });
+          const aImg = document.createElement('img');
+          aImg.src = '/public/img/play_arrow_24p.svg';
+          aImg.width = 18;
+          aImg.height = 18;
+          aImg.alt = 'Lire sur YouTube';
+          aImg.className = 'link-icon';
+          a.appendChild(aImg);
           linkCell.appendChild(a);
           likes.textContent = fmtNum(v.likes||0);
           likes.style.color = '#9ca3af';
