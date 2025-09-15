@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Flux pays (channel_country → trending_country)</title>
   <style>
-    :root { --bg:#0f172a; --panel:#0b1220; --text:#e5e7eb; --muted:#9ca3af; --border:#1f2937; }
+    :root { --bg:#0f172a; --panel:#0b1220; --text:#e5e7eb; --muted:#343638; --border:#1f2937; }
     *{box-sizing:border-box}
     html, body { height:100%; }
     body{margin:0;background:var(--bg);color:var(--text);font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial; overflow:hidden}
@@ -33,10 +33,10 @@
     label{display:block;margin-bottom:8px;color:var(--muted);font-size:13px}
     select,input{width:100%;padding:8px 10px;background:#0f172a;border:1px solid var(--border);border-radius:8px;color:var(--text)}
     .tooltip{position:fixed;pointer-events:none;background:#111827;border:1px solid var(--border);padding:8px 10px;border-radius:8px;font-size:12px;color:var(--text);display:none}
-    .country{ transition: fill .18s ease, stroke .18s ease, stroke-width .18s ease; }
-    .country.hl{ fill:#162033; stroke:#22c55e; stroke-width:1.0; }
-    .country.sel{ fill:#22c55ea5; }
-    .country.dst{ fill:#22c55e30; }
+    .country{ transition: fill .18s ease, stroke .18s ease, stroke-width .18s ease; fill:#000000; stroke:#343638; stroke-width:0.5; }
+    .country.hl{ fill:#000000; stroke:#ffffff; stroke-width:1.0; }
+    .country.sel{ fill:#000000; stroke:#ffffff; stroke-width:1.0; }
+    .country.dst{ fill:#000000; stroke:#343638; stroke-width:0.5; }
     /* Icône de lien bleu clair par défaut, plus bleue au survol */
     .link-icon{ filter: hue-rotate(200deg) saturate(180%) brightness(1.0); opacity: .9; transition: filter .15s ease, opacity .15s ease; }
     a:hover .link-icon{ filter: hue-rotate(200deg) saturate(280%) brightness(1.08); opacity: 1; }
@@ -1043,33 +1043,24 @@
       if (arcFilter && arcFilter.srcKey && arcFilter.dstKey){
         flowsInput = (flows||[]).filter(d => normalizeName(d.src) === arcFilter.srcKey && normalizeName(d.dst) === arcFilter.dstKey);
       }
-      // Sphère (océan) et graticule (visible dans les deux modes)
+      // Sphère (océan) - pas de graticule
       g.append('path')
         .datum({type:'Sphere'})
-        .attr('fill', '#0b1220')
-        .attr('stroke', '#1f2937')
-        .attr('stroke-width', .8)
-        .attr('d', path);
-      g.append('path')
-        .datum(d3.geoGraticule10())
-        .attr('fill', 'none')
-        .attr('stroke', '#1f2937')
-        .attr('stroke-opacity', 0.6)
-        .attr('stroke-width', .5)
+        .attr('fill', '#343638')
+        .attr('stroke', 'none')
         .attr('d', path);
       g.selectAll('path.country').data(geo.features).join('path')
         .attr('class', 'country')
         .attr('d', path)
-        .attr('data-key', d => normalizeName(d.properties && d.properties.name) || '')
-        .attr('fill', '#0b1220')
-        .attr('stroke', '#1f2937').attr('stroke-width', .6);
+        .attr('data-key', d => normalizeName(d.properties && d.properties.name) || '');
 
       updateSelectedCountryHighlight();
 
-      // const maxViews = d3.max(flows, d => d.views || 0) || 1;
+      const maxViews = d3.max(flowsInput, d => d.views || 0) || 1;
       const maxCount = d3.max(flowsInput, d => d.count || 0) || 1;
-      const stroke = d3.scaleSqrt().domain([1, maxCount]).range([2.0, 2.0]);
+      const widthByViews = d3.scaleSqrt().domain([0, maxViews]).range([0.1, 2.0]);
       const opacity = d3.scaleSqrt().domain([1, maxCount]).range([0.5, 1.0]);
+      const colorScale = d3.scaleSequential().domain([maxViews, 0]).interpolator(d3.interpolateYlGnBu);
 
       const arcs = flowsInput.map(d => {
         const srcLL = countryLonLat(geo, d.src);
@@ -1102,9 +1093,9 @@
         .attr('data-src-key', d => normalizeName(d.src))
         .attr('data-dst-key', d => normalizeName(d.dst))
         .attr('fill', 'none')
-        .attr('stroke', '#22c55e')
+        .attr('stroke', d => colorScale(d.views || 0))
         .attr('stroke-opacity', d => opacity(d.count||0))
-        .attr('stroke-width', d => stroke(d.count||0))
+        .attr('stroke-width', d => widthByViews(d.views||0))
         .attr('d', d => {
           if (projectionMode === 'globe'){
             const interpolate = d3.geoInterpolate(d.srcLL, d.dstLL);
@@ -1138,7 +1129,7 @@
         .attr('fill', 'none')
         .attr('stroke', '#000')
         .attr('stroke-opacity', 0)
-        .attr('stroke-width', d => (stroke(d.count||0) + 3))
+        .attr('stroke-width', d => Math.max(3, (widthByViews(d.views||0) + 3)))
         .attr('d', d => {
           if (projectionMode === 'globe'){
             const interpolate = d3.geoInterpolate(d.srcLL, d.dstLL);
@@ -1215,6 +1206,56 @@
           }catch{}
         });
 
+      // Légende de l'échelle de couleurs (en bas à droite de la map)
+      try{
+        svg.select('#colorLegend').remove();
+        const legendWidth = 200;
+        const legendHeight = 10;
+        const legendMarginPx = 12;
+        const svgEl = svg.node();
+        const cssW = (svgEl && svgEl.clientWidth) ? svgEl.clientWidth : width;
+        const cssH = (svgEl && svgEl.clientHeight) ? svgEl.clientHeight : height;
+        const kx = width / Math.max(1, cssW);
+        const ky = height / Math.max(1, cssH);
+        const leftSvg = legendMarginPx * kx;
+        const bottomSvg = legendMarginPx * ky;
+        const offsetYSvg = 28 * ky; // espace pour les ticks/label
+        const lg = svg.append('g')
+          .attr('id', 'colorLegend')
+          .attr('transform', `translate(${leftSvg}, ${height - bottomSvg - offsetYSvg})`);
+        // Bande de dégradé (0 à gauche -> max à droite)
+        const n = 100;
+        const band = d3.range(n).map(i => ({
+          x: i * (legendWidth / n),
+          w: (legendWidth / n) + 0.5,
+          v: (i / (n - 1)) * maxViews
+        }));
+        lg.selectAll('rect.legend-band').data(band).join('rect')
+          .attr('class', 'legend-band')
+          .attr('x', d => d.x)
+          .attr('y', 0)
+          .attr('width', d => d.w)
+          .attr('height', legendHeight)
+          .attr('fill', d => colorScale(d.v));
+        // Axe (0 à gauche -> max à droite)
+        const sx = d3.scaleLinear().domain([0, maxViews]).range([0, legendWidth]);
+        const ax = d3.axisBottom(sx).ticks(3).tickSizeOuter(0).tickFormat(d3.format('.2s'));
+        lg.append('g')
+          .attr('transform', `translate(0, ${legendHeight})`)
+          .call(ax)
+          .call(g => g.selectAll('text').attr('fill', '#9ca3af'))
+          .call(g => g.selectAll('line').attr('stroke', '#1f2937'))
+          .call(g => g.select('.domain').attr('stroke', '#1f2937'));
+        // Label
+        lg.append('text')
+          .attr('x', legendWidth)
+          .attr('y', -4)
+          .attr('text-anchor', 'end')
+          .attr('fill', '#9ca3af')
+          .attr('font-size', 11)
+          .text('Vues');
+      }catch{}
+
       // Cercles pour les flux où src == dst (comptage de vidéos distinctes au jour sélectionné)
       const selfFlows = flowsInput.filter(d => normalizeName(d.src) === normalizeName(d.dst));
       const maxSelf = d3.max(selfFlows, d => d.count || 0) || 1;
@@ -1273,27 +1314,19 @@
 
       targetG.append('path')
         .datum({type:'Sphere'})
-        .attr('fill', '#0b1220')
-        .attr('stroke', '#1f2937')
-        .attr('stroke-width', .8)
-        .attr('d', pth);
-      targetG.append('path')
-        .datum(d3.geoGraticule10())
-        .attr('fill', 'none')
-        .attr('stroke', '#1f2937')
-        .attr('stroke-opacity', 0.6)
-        .attr('stroke-width', .5)
+        .attr('fill', '#343638')
+        .attr('stroke', 'none')
         .attr('d', pth);
       targetG.selectAll('path.country').data(geo.features).join('path')
         .attr('class', 'country')
         .attr('d', pth)
-        .attr('data-key', d => normalizeName(d.properties && d.properties.name) || '')
-        .attr('fill', '#0b1220')
-        .attr('stroke', '#1f2937').attr('stroke-width', .6);
+        .attr('data-key', d => normalizeName(d.properties && d.properties.name) || '');
 
+      const maxViews = d3.max(flows, d => d.views || 0) || 1;
       const maxCount = d3.max(flows, d => d.count || 0) || 1;
-      const stroke = d3.scaleSqrt().domain([1, maxCount]).range([0.5, 0.5]);
+      const widthByViews = d3.scaleSqrt().domain([0, maxViews]).range([0.5, 5.0]);
       const opacity = d3.scaleSqrt().domain([1, maxCount]).range([0.25, 0.95]);
+      const colorScale = d3.scaleSequential().domain([maxViews, 0]).interpolator(d3.interpolateYlGnBu);
 
       const arcs = flows.map(d => {
         const srcLL = countryLL(d.src);
@@ -1305,9 +1338,9 @@
       targetG.selectAll('path.flow').data(arcs).join('path')
         .attr('class', 'flow')
         .attr('fill', 'none')
-        .attr('stroke', '#22c55e')
+        .attr('stroke', d => colorScale(d.views || 0))
         .attr('stroke-opacity', d => opacity(d.count||0))
-        .attr('stroke-width', d => stroke(d.count||0))
+        .attr('stroke-width', d => widthByViews(d.views||0))
         .attr('d', d => {
           if (mode === 'globe'){
             const interpolate = d3.geoInterpolate(d.srcLL, d.dstLL);
