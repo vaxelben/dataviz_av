@@ -16,15 +16,20 @@
     #filterPanel{ background:transparent; border:none; border-radius:0; padding:12px; }
     .panel{ background:transparent; border:none; border-radius:0; }
     #map{ width:100%; height:auto; min-height:0; position: relative; flex:1 1 0; }
-    #chart{ width:100%; border-top:1px solid var(--border); flex:0 0 33vh; min-height:33vh; }
+    #chartsRow{ width:100%; border-top:1px solid var(--border); flex:0 0 320px; height:320px; min-height:320px; display:grid; grid-template-columns: 1fr 1fr; overflow:hidden }
+    #chart, #chart2{ width:100%; height:100%; overflow:hidden; position:relative }
+    #chartsRow svg{ display:block }
+    #chart2{ border-left:1px solid var(--border); }
     #map svg{ cursor: default; }
-    .btn-reset{ position:absolute; top:12px; left:12px; width:36px; height:36px; display:grid; place-items:center; border:1px solid var(--border); background:#0b1220aa; color:var(--text); border-radius:8px; cursor:pointer; z-index:5; }
-    .btn-reset:hover{ background:#111827; }
-    .btn-drag{ position:absolute; top:12px; left:56px; width:36px; height:36px; display:grid; place-items:center; border:1px solid var(--border); background:#0b1220aa; color:var(--text); border-radius:8px; cursor:pointer; z-index:5; }
-    .btn-drag:hover{ background:#111827; }
+    /* Colonne de boutons en haut à gauche */
+    .btn-col{ position:absolute; top:12px; left:12px; display:flex; flex-direction:column; gap:8px; z-index:5; }
+    /* Boutons carrés, même taille */
+    .btn-reset, .btn-drag, .btn-proj, .btn-pin{ width:36px; height:36px; display:grid; place-items:center; border:1px solid var(--border); background:#0b1220aa; color:var(--text); border-radius:8px; cursor:pointer; }
+    .btn-reset:hover, .btn-drag:hover, .btn-proj:hover, .btn-pin:hover{ background:#111827; }
     .btn-drag.is-on{ outline:2px solid #22c55e; }
-    .btn-proj{ position:absolute; top:12px; left:100px; min-width:78px; height:36px; display:grid; place-items:center; padding:0 10px; border:1px solid var(--border); background:#0b1220aa; color:var(--text); border-radius:8px; cursor:pointer; z-index:5; }
-    .btn-proj:hover{ background:#111827; }
+    .btn-proj{ padding:0; min-width:36px; }
+    /* Pas de surbrillance pour le bouton pin/unpin */
+    .btn-pin.is-on{ outline:none; }
     label{display:block;margin-bottom:8px;color:var(--muted);font-size:13px}
     select,input{width:100%;padding:8px 10px;background:#0f172a;border:1px solid var(--border);border-radius:8px;color:var(--text)}
     .tooltip{position:fixed;pointer-events:none;background:#111827;border:1px solid var(--border);padding:8px 10px;border-radius:8px;font-size:12px;color:var(--text);display:none}
@@ -46,11 +51,17 @@
     <div class="row">
       <div class="panel" id="mapPanel">
         <div id="map">
-          <button id="resetView" class="btn-reset" title="Réinitialiser la vue" aria-label="Réinitialiser la vue">⟲</button>
-          <button id="toggleDrag" class="btn-drag" title="Activer/Désactiver le déplacement" aria-label="Activer/Désactiver le déplacement">✥</button>
-          <button id="toggleProjection" class="btn-proj" title="Basculer projection" aria-label="Basculer projection"></button>
+          <div class="btn-col">
+            <button id="resetView" class="btn-reset" title="Réinitialiser la vue" aria-label="Réinitialiser la vue">⟲</button>
+            <button id="toggleDrag" class="btn-drag" title="Activer/Désactiver le déplacement" aria-label="Activer/Désactiver le déplacement">✥</button>
+            <button id="toggleProjection" class="btn-proj" title="Basculer projection" aria-label="Basculer projection"></button>
+            <button id="togglePin" class="btn-pin is-on" title="Vue verrouillée (pas de recentrage auto)" aria-label="Basculer verrouillage de la vue"></button>
+          </div>
         </div>
-        <div id="chart"></div>
+        <div id="chartsRow">
+          <div id="chart"></div>
+          <div id="chart2"></div>
+        </div>
       </div>
       <div class="panel" id="filterPanel" style="display:flex;flex-direction:column;gap:12px;overflow:auto">
         <div style="display:flex;align-items:center;gap:8px">
@@ -90,11 +101,11 @@
     const width = 980, height = 540;
     const svg = d3.select('#map').append('svg').attr('viewBox', `0 0 ${width} ${height}`).style('width','100%').style('height','100%');
     const g = svg.append('g');
-    let projectionMode = 'globe';
+    let projectionMode = 'map';
     const baseScaleGlobe = 240;
     const baseScaleMap = 165;
     let currentZoomK = 1;
-    let projection = d3.geoOrthographic().scale(baseScaleGlobe).translate([width/2, height/2]).clipAngle(90);
+    let projection = d3.geoNaturalEarth1().scale(baseScaleMap).translate([width/2, height/2]);
     let path = d3.geoPath(projection);
     let blendProjectFn = null; // fonction de projection interpolée pendant le morphing
     let blendT = 0;            // progression du morphing [0..1]
@@ -128,6 +139,13 @@
     projIcon.alt = '';
     toggleProjectionBtn.textContent = '';
     toggleProjectionBtn.appendChild(projIcon);
+    const togglePinBtn = document.getElementById('togglePin');
+    const pinIcon = document.createElement('img');
+    pinIcon.width = 20;
+    pinIcon.height = 20;
+    pinIcon.alt = '';
+    togglePinBtn.textContent = '';
+    togglePinBtn.appendChild(pinIcon);
     let mode = 'on'; // 'off' = domestique (src=dst), 'on' = international (src!=dst)
     let lastFlows = [];
     let zoomBehavior = null;
@@ -140,6 +158,7 @@
     let arcHover = null; // { srcKey, dstKey }
     let arcFilter = null; // { srcKey, dstKey }
     let chartFollowSelection = true; // Quand false, ne pas toucher au graphe en lignes
+    let pinActive = true; // Mode pin actif par défaut: pas de recentrage auto
 
     function flowsForSelectedVideo(){
       if (!selectedVideoData) return [];
@@ -620,6 +639,67 @@
         });
       }
     }
+
+    function renderScatterChart(videoList){
+      const chart2Div = document.getElementById('chart2');
+      if (!chart2Div) return;
+      chart2Div.replaceChildren();
+      d3.selectAll('.scatter-tooltip').remove();
+      const vids = Array.isArray(videoList) ? videoList : [];
+      if (!vids.length) return;
+      const m = { t:20, r:16, b:32, l:44 };
+      const w = chart2Div.clientWidth || Math.max(360, Math.floor(width/2));
+      const h = chart2Div.clientHeight || 320;
+      const svgS = d3.select(chart2Div).append('svg').attr('width', '100%').attr('height', '100%').attr('viewBox', `0 0 ${w} ${h}`);
+      const gS = svgS.append('g').attr('transform', `translate(${m.l},${m.t})`);
+      const innerW = w - m.l - m.r;
+      const innerH = h - m.t - m.b;
+      const views = vids.map(v => +v.views || 0);
+      const likes = vids.map(v => +v.likes || 0);
+      const x = d3.scaleSqrt().domain([0, d3.max(views)||1]).nice().range([0, innerW]);
+      const y = d3.scaleSqrt().domain([0, d3.max(likes)||1]).nice().range([innerH, 0]);
+      const ax = d3.axisBottom(x).ticks(5).tickSizeOuter(0).tickFormat(d3.format('.2s'));
+      const ay = d3.axisLeft(y).ticks(5).tickSize(-innerW).tickFormat(d3.format('.2s'));
+      gS.append('g').attr('transform', `translate(0,${innerH})`).call(ax).selectAll('text').attr('fill', '#9ca3af');
+      gS.append('g').call(ay).call(g => g.selectAll('text').attr('fill', '#9ca3af')).call(g => g.selectAll('line').attr('stroke', '#1f2937')).call(g => g.select('.domain').attr('stroke', '#1f2937'));
+      gS.append('text').attr('x', innerW).attr('y', innerH + 26).attr('text-anchor', 'end').attr('fill', '#9ca3af').attr('font-size', 11).text('Vues');
+      gS.append('text').attr('x', -10).attr('y', -6).attr('text-anchor', 'start').attr('fill', '#9ca3af').attr('font-size', 11).text('Likes');
+      const tt = d3.select('body').append('div').attr('class', 'scatter-tooltip').style('position', 'absolute').style('background', '#1f2937').style('color', 'white').style('padding', '8px 12px').style('border-radius', '4px').style('font-size', '12px').style('pointer-events', 'none').style('opacity', 0).style('z-index', 1000);
+      const fmt = d3.format(',');
+      const nodes = vids.map(v => ({ id: v.video_id, title: v.video_title || v.video_id, x: x(+v.views||0), y: y(+v.likes||0), views: +v.views||0, likes: +v.likes||0 }));
+      const r = d3.scaleSqrt().domain([0, d3.max(views)||1]).range([2, 5]);
+      gS.selectAll('circle.pt').data(nodes).join('circle')
+        .attr('class', 'pt')
+        .attr('cx', d => d.x)
+        .attr('cy', d => d.y)
+        .attr('r', d => r(d.views))
+        .attr('fill', '#22c55e')
+        .attr('fill-opacity', 0.8)
+        .attr('stroke', 'none')
+        .style('cursor', 'pointer')
+        .on('mouseenter', function(ev, d){
+          tt.style('opacity', 1).html(`<strong>${d.title}</strong><br/>Vues: ${fmt(d.views)}<br/>Likes: ${fmt(d.likes)}`);
+        })
+        .on('mousemove', function(ev){
+          const padding = 12;
+          tt.style('left', (ev.pageX + padding) + 'px').style('top', (ev.pageY + padding) + 'px');
+        })
+        .on('mouseleave', function(){ tt.style('opacity', 0); })
+        .on('click', async function(ev, d){
+          // Aligner avec le reste: appliquer la sélection vidéo comme dans la liste/ligne
+          if (window && typeof window.highlightSelectedVideoRow === 'function') {
+            selectedVideoId = d.id;
+            selectedVideoData = (videosCache||[]).find(v => v.video_id === d.id) || { video_id: d.id, video_title: d.title };
+            renderVideoList([selectedVideoData]);
+            highlightSelectedVideoRow();
+            if (window.refreshMapOnly) await window.refreshMapOnly();
+            const tl = await fetchVideoViewsTimeline(d.id);
+            renderViewsChartMulti([{ videoId: d.id, data: tl }], d.id);
+            renderScatterChart([selectedVideoData]);
+          }
+        });
+    }
+    window.renderScatterChart = renderScatterChart;
 
     function setChartHighlightMany(videoIds){
       const ids = Array.isArray(videoIds) ? new Set(videoIds) : null;
@@ -1124,8 +1204,7 @@
         .on('click', async (ev, d) => {
           arcFilter = { srcKey: normalizeName(d.src), dstKey: normalizeName(d.dst), rawSrc: d.src, rawDst: d.dst };
           render(worldGeo, lastFlows);
-          if (projectionMode === 'map') { fitMapToArcCountries(600, 12); }
-          else if (projectionMode === 'globe') { fitGlobeToArcCountries(900, 16); }
+          autoFitToData(600, 12);
           try{
             const list = await fetchVideosByFlow(arcFilter.rawSrc, arcFilter.rawDst);
             videosCache = list;
@@ -1301,13 +1380,14 @@
       ]);
       lastFlows = flows;
       render(geo, flows);
-      centerOnSelectedCountry(800);
+      autoCenterOnSelectedCountry(800);
       videosCache = vids;
       renderVideoList(videosCache);
       // Rendre le graphe par défaut selon les filtres de démarrage
       try {
         const series = await fetchTimelinesForVideos(videosCache, 20);
         renderViewsChartMulti(series, null);
+        renderScatterChart(videosCache);
       } catch (e) {
         // silencieux
       }
@@ -1395,8 +1475,7 @@
         }
         arcFilter = null;
         render(worldGeo, lastFlows);
-        if (projectionMode === 'map') { fitMapToArcCountries(600, 16); }
-        else if (projectionMode === 'globe') { fitGlobeToArcCountries(900, 16); }
+        autoFitToData();
         // rétablir graphe et liste par défaut
         (async () => {
           // Recharger la liste complète
@@ -1436,6 +1515,27 @@
           isCtrlDown = false; updateDragUI();
         }
       });
+
+      // Bouton PIN (verrouillage de la vue)
+      function updatePinUI(){
+        togglePinBtn.classList.toggle('is-on', !!pinActive);
+        togglePinBtn.setAttribute('aria-pressed', String(!!pinActive));
+        togglePinBtn.title = pinActive ? 'Vue verrouillée (pas de recentrage auto)' : 'Vue déverrouillée (recentrage auto)';
+        pinIcon.src = pinActive ? '/public/img/pin_24p.svg' : '/public/img/unpin_24p.svg';
+        pinIcon.alt = pinActive ? 'Verrouillé' : 'Déverrouillé';
+      }
+      function shouldAutoRecenter(){ return !pinActive; }
+      function autoFitToData(duration, padding){
+        if (!shouldAutoRecenter()) return;
+        if (projectionMode === 'map') { fitMapToArcCountries(duration ?? 600, padding ?? 16); }
+        else if (projectionMode === 'globe') { fitGlobeToArcCountries(duration ?? 900, padding ?? 16); }
+      }
+      function autoCenterOnSelectedCountry(duration){
+        if (!shouldAutoRecenter()) return;
+        centerOnSelectedCountry(duration);
+      }
+      updatePinUI();
+      togglePinBtn.addEventListener('click', () => { pinActive = !pinActive; updatePinUI(); });
 
       function setProjectionMode(mode){
         const prevMode = projectionMode;
@@ -1568,7 +1668,7 @@
           render(worldGeo, lastFlows);
           updateProjectionUI();
           updateSelectedCountryHighlight();
-          if (targetMode === 'globe') { fitGlobeToArcCountries(900, 16); } else { fitMapToArcCountries(800, 16); }
+          autoFitToData();
         });
       }
 
@@ -1593,17 +1693,18 @@
         ]);
         lastFlows = fl;
         render(geo, fl);
-        if (projectionMode === 'map') { fitMapToArcCountries(650, 16); }
-        else if (projectionMode === 'globe') { fitGlobeToArcCountries(900, 16); }
+        autoFitToData();
         videosCache = vids;
         renderVideoList(videosCache);
         if (selectedVideoId && chartFollowSelection !== false){
           const tl = await fetchVideoViewsTimeline(selectedVideoId);
           renderViewsChartMulti([{ videoId: selectedVideoId, data: tl }], selectedVideoId);
+          renderScatterChart(videosCache);
         } else {
           // Charger progressivement plus de timelines
           const series = await loadMoreTimelines(videosCache, 15);
           renderViewsChartMulti(series, null);
+          renderScatterChart(videosCache);
           // Précharger plus de timelines en arrière-plan
           preloadTimelines(videosCache, 300);
         }
@@ -1613,8 +1714,7 @@
         const fl = await (selectedVideoId ? fetchFlowsByVideo(selectedVideoId, false) : fetchFlows());
         lastFlows = fl;
         render(geo, fl);
-        if (projectionMode === 'map') { fitMapToArcCountries(600, 16); }
-        else if (projectionMode === 'globe') { fitGlobeToArcCountries(900, 16); }
+        autoFitToData();
       }
       window.refreshMapOnly = refreshMapOnly;
 
@@ -1718,6 +1818,7 @@
               if (window.refreshMapOnly) await window.refreshMapOnly();
               const series = await fetchTimelinesForVideos(fullVideos, 20);
               renderViewsChartMulti(series, null);
+              renderScatterChart(fullVideos);
             } else {
               // Sélectionner => filtrer la liste pour cette vidéo uniquement
               selectedVideoId = v.video_id; selectedVideoData = v;
@@ -1727,6 +1828,7 @@
               if (window.refreshMapOnly) await window.refreshMapOnly();
               const timeline = await fetchVideoViewsTimeline(selectedVideoId);
               renderViewsChartMulti([{ videoId: selectedVideoId, data: timeline }], selectedVideoId);
+              renderScatterChart([v]);
             }
           });
           return row;
@@ -1760,8 +1862,7 @@
             const fl = await fetchFlows();
             lastFlows = fl;
             render(geo, fl);
-            if (projectionMode === 'map') { fitMapToArcCountries(600, 16); }
-            else if (projectionMode === 'globe') { fitGlobeToArcCountries(900, 16); }
+            autoFitToData();
             return; // Garder la vidéo sélectionnée et son graphique
           }
           
@@ -1772,8 +1873,7 @@
           ]);
           lastFlows = fl;
           render(geo, fl);
-          if (projectionMode === 'map') { fitMapToArcCountries(600, 16); }
-          else if (projectionMode === 'globe') { fitGlobeToArcCountries(900, 16); }
+          autoFitToData();
           videosCache = vids;
           if (window.renderVideoList) window.renderVideoList(videosCache);
           
@@ -1781,12 +1881,13 @@
           // Recharger les timelines pour les vidéos de cette date spécifique
           const series = await loadMoreTimelines(videosCache, 15);
           renderViewsChartMulti(series, null);
+          renderScatterChart(videosCache);
         }, 50); // Débounce de 50ms pour une réactivité optimale
       });
       srcSelect.addEventListener('change', () => {
         selectedVideoId = null; selectedVideoData = null;
         arcFilter = null; // Réinitialiser le filtre d'arc
-        updateSelectedCountryHighlight(); centerOnSelectedCountry(800); refresh();
+        updateSelectedCountryHighlight(); autoCenterOnSelectedCountry(800); refresh();
       });
       toggleModeBtn.addEventListener('click', async () => {
         mode = (mode === 'off') ? 'on' : 'off';
