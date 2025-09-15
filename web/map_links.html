@@ -833,6 +833,84 @@
         });
     }
 
+    // Rotation + zoom en globe vers un lon/lat cible avec un facteur d'échelle cible
+    function rotateAndScaleToLonLat(lonlat, kTarget, duration = 900){
+      if (projectionMode !== 'globe' || !lonlat) return;
+      const r0 = projection.rotate();
+      const target = [-(lonlat[0]||0), -(lonlat[1]||0), 0];
+      const short = (a, b) => { const da = ((b - a + 540) % 360) - 180; return (t) => a + da * t; };
+      const yaw = short((r0[0]||0), target[0]);
+      const pitch = short((r0[1]||0), target[1]);
+      const roll = short((r0[2]||0), 0);
+      const s0 = baseScaleGlobe * currentZoomK;
+      const s1 = baseScaleGlobe * Math.max(0.7, Math.min(12, kTarget||currentZoomK));
+      d3.transition().duration(duration).ease(d3.easeCubicInOut)
+        .tween('rotate-scale', () => (t) => {
+          projection.rotate([yaw(t), pitch(t), roll(t)]).scale(s0 + (s1 - s0) * t);
+          render(worldGeo, lastFlows);
+        })
+        .on('end', () => { currentZoomK = (s1 / baseScaleGlobe); });
+    }
+
+    // Ajuste la rotation et l'échelle du globe pour inclure tous les pays des arcs visibles
+    function fitGlobeToArcCountries(duration = 800, padding = 16){
+      if (projectionMode !== 'globe' || !worldGeo || !Array.isArray(lastFlows)) return;
+      let flowsInput = lastFlows;
+      if (arcFilter && arcFilter.srcKey && arcFilter.dstKey){
+        flowsInput = (lastFlows||[]).filter(d => normalizeName(d.src) === arcFilter.srcKey && normalizeName(d.dst) === arcFilter.dstKey);
+      }
+      const names = new Set();
+      for (const d of (flowsInput||[])){
+        if (d && d.src) names.add(normalizeName(d.src));
+        if (d && d.dst) names.add(normalizeName(d.dst));
+      }
+      if (!names.size) return;
+      const lls = [];
+      for (const f of worldGeo.features||[]){
+        const nm = normalizeName(f.properties && f.properties.name);
+        if (names.has(nm)){
+          const c = countryLonLat(worldGeo, nm);
+          if (c) lls.push(c);
+        }
+      }
+      if (!lls.length) return;
+      // Calculer un centre sphérique moyen
+      let sx = 0, sy = 0, sz = 0;
+      for (const [lon, lat] of lls){
+        const λ = (lon||0) * Math.PI/180, φ = (lat||0) * Math.PI/180;
+        const cx = Math.cos(φ) * Math.cos(λ);
+        const cy = Math.cos(φ) * Math.sin(λ);
+        const cz = Math.sin(φ);
+        sx += cx; sy += cy; sz += cz;
+      }
+      const norm = Math.max(1e-9, Math.sqrt(sx*sx + sy*sy + sz*sz));
+      sx /= norm; sy /= norm; sz /= norm;
+      const centerLat = Math.asin(sz) * 180/Math.PI;
+      const centerLon = Math.atan2(sy, sx) * 180/Math.PI;
+
+      // Estimer l'échelle nécessaire avec une projection temporaire à rotation cible
+      const kCur = currentZoomK;
+      const sCur = baseScaleGlobe * kCur;
+      const rot = [-(centerLon||0), -(centerLat||0), 0];
+      const projTmp = d3.geoOrthographic().scale(sCur).translate([width/2, height/2]).clipAngle(90).rotate(rot);
+      const pthTmp = d3.geoPath(projTmp);
+      const feats = (worldGeo.features||[]).filter(f => names.has(normalizeName(f.properties && f.properties.name)));
+      const fc = { type:'FeatureCollection', features: feats };
+      const b = pthTmp.bounds(fc);
+      if (!b || !Array.isArray(b[0]) || !Array.isArray(b[1])){
+        // Au minimum, effectuer la rotation
+        rotateToLonLat([centerLon, centerLat], duration);
+        return;
+      }
+      let x0 = b[0][0], y0 = b[0][1], x1 = b[1][0], y1 = b[1][1];
+      x0 -= padding; y0 -= padding; x1 += padding; y1 += padding;
+      const dx = Math.max(1, x1 - x0);
+      const dy = Math.max(1, y1 - y0);
+      const alpha = Math.min(width / dx, height / dy);
+      const kTarget = Math.max(0.7, Math.min(12, kCur * alpha));
+      rotateAndScaleToLonLat([centerLon, centerLat], kTarget, duration);
+    }
+
     function centerOnSelectedCountry(duration = 1000){
       if (projectionMode !== 'globe') return;
       if (!worldGeo || !srcSelect) return;
@@ -840,6 +918,41 @@
       if (!selected) return;
       const ll = countryLonLat(worldGeo, selected);
       if (ll) rotateToLonLat(ll, duration);
+    }
+
+    // Ajuste le zoom/pan de la carte pour inclure tous les pays présents
+    // dans les arcs actuellement affichés (en respectant un éventuel filtre d'arc)
+    function fitMapToArcCountries(duration = 700, padding = 16){
+      if (projectionMode !== 'map' || !worldGeo || !Array.isArray(lastFlows) || !zoomBehavior) return;
+      // Appliquer le même filtrage que dans render()
+      let flowsInput = lastFlows;
+      if (arcFilter && arcFilter.srcKey && arcFilter.dstKey){
+        flowsInput = (lastFlows||[]).filter(d => normalizeName(d.src) === arcFilter.srcKey && normalizeName(d.dst) === arcFilter.dstKey);
+      }
+      const names = new Set();
+      for (const d of (flowsInput||[])){
+        if (d && d.src) names.add(normalizeName(d.src));
+        if (d && d.dst) names.add(normalizeName(d.dst));
+      }
+      if (!names.size) return;
+      const feats = (worldGeo.features||[]).filter(f => names.has(normalizeName(f.properties && f.properties.name)));
+      if (!feats.length) return;
+      const fc = { type:'FeatureCollection', features: feats };
+      const b = path.bounds(fc);
+      if (!b || !Array.isArray(b[0]) || !Array.isArray(b[1])) return;
+      let x0 = b[0][0], y0 = b[0][1], x1 = b[1][0], y1 = b[1][1];
+      x0 -= padding; y0 -= padding; x1 += padding; y1 += padding;
+      const dx = Math.max(1, x1 - x0);
+      const dy = Math.max(1, y1 - y0);
+      const cx = (x0 + x1) / 2;
+      const cy = (y0 + y1) / 2;
+      const kBase = Math.min(width / dx, height / dy);
+      const k = Math.max(0.7, Math.min(12, kBase));
+      const t = d3.zoomIdentity
+        .translate(width/2, height/2)
+        .scale(k)
+        .translate(-cx, -cy);
+      svg.transition().duration(duration).ease(d3.easeCubicInOut).call(zoomBehavior.transform, t);
     }
 
     function render(geo, flows){
@@ -1011,6 +1124,8 @@
         .on('click', async (ev, d) => {
           arcFilter = { srcKey: normalizeName(d.src), dstKey: normalizeName(d.dst), rawSrc: d.src, rawDst: d.dst };
           render(worldGeo, lastFlows);
+          if (projectionMode === 'map') { fitMapToArcCountries(600, 12); }
+          else if (projectionMode === 'globe') { fitGlobeToArcCountries(900, 16); }
           try{
             const list = await fetchVideosByFlow(arcFilter.rawSrc, arcFilter.rawDst);
             videosCache = list;
@@ -1280,6 +1395,8 @@
         }
         arcFilter = null;
         render(worldGeo, lastFlows);
+        if (projectionMode === 'map') { fitMapToArcCountries(600, 16); }
+        else if (projectionMode === 'globe') { fitGlobeToArcCountries(900, 16); }
         // rétablir graphe et liste par défaut
         (async () => {
           // Recharger la liste complète
@@ -1358,7 +1475,7 @@
         }
 
         projectionMode = 'blend';
-        const dur = 1200;
+        const dur = 700;
 
         // Supprimer le transform immédiatement pour éviter les conflits
         g.attr('transform', null);
@@ -1451,7 +1568,7 @@
           render(worldGeo, lastFlows);
           updateProjectionUI();
           updateSelectedCountryHighlight();
-          if (targetMode === 'globe') { centerOnSelectedCountry(800); }
+          if (targetMode === 'globe') { fitGlobeToArcCountries(900, 16); } else { fitMapToArcCountries(800, 16); }
         });
       }
 
@@ -1476,6 +1593,8 @@
         ]);
         lastFlows = fl;
         render(geo, fl);
+        if (projectionMode === 'map') { fitMapToArcCountries(650, 16); }
+        else if (projectionMode === 'globe') { fitGlobeToArcCountries(900, 16); }
         videosCache = vids;
         renderVideoList(videosCache);
         if (selectedVideoId && chartFollowSelection !== false){
@@ -1494,6 +1613,8 @@
         const fl = await (selectedVideoId ? fetchFlowsByVideo(selectedVideoId, false) : fetchFlows());
         lastFlows = fl;
         render(geo, fl);
+        if (projectionMode === 'map') { fitMapToArcCountries(600, 16); }
+        else if (projectionMode === 'globe') { fitGlobeToArcCountries(900, 16); }
       }
       window.refreshMapOnly = refreshMapOnly;
 
@@ -1639,6 +1760,8 @@
             const fl = await fetchFlows();
             lastFlows = fl;
             render(geo, fl);
+            if (projectionMode === 'map') { fitMapToArcCountries(600, 16); }
+            else if (projectionMode === 'globe') { fitGlobeToArcCountries(900, 16); }
             return; // Garder la vidéo sélectionnée et son graphique
           }
           
@@ -1649,6 +1772,8 @@
           ]);
           lastFlows = fl;
           render(geo, fl);
+          if (projectionMode === 'map') { fitMapToArcCountries(600, 16); }
+          else if (projectionMode === 'globe') { fitGlobeToArcCountries(900, 16); }
           videosCache = vids;
           if (window.renderVideoList) window.renderVideoList(videosCache);
           
