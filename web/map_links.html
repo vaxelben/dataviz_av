@@ -305,11 +305,11 @@
 
     function renderViewsChartMulti(seriesList, highlightVideoId = null){
       chartDiv.replaceChildren();
-      // Nettoyer les infobulles existantes
       d3.selectAll('.chart-tooltip').remove();
       const list = Array.isArray(seriesList) ? seriesList : [];
       if (!list.length) return;
-      const m = {t:20, r:16, b:24, l:40}; // Augmenter la marge du haut pour les labels de date
+      
+      const m = {t:20, r:16, b:24, l:40};
       const w = chartDiv.clientWidth || width;
       const h = chartDiv.clientHeight || 320;
       const svgC = d3.select(chartDiv).append('svg').attr('width', '100%').attr('height', '100%').attr('viewBox', `0 0 ${w} ${h}`);
@@ -317,21 +317,39 @@
       const innerW = w - m.l - m.r;
       const innerH = h - m.t - m.b;
       const parse = d3.utcParse('%Y-%m-%d');
+      
+      // Modifier le mapping des données pour utiliser engagement_rate
       const seriesParsed = list.map(s => ({
         videoId: s.videoId,
-        pts: (s.data||[]).map(d => ({ d: parse(d.date), v: +d.views||0 })).filter(d => d.d)
+        pts: (s.data||[]).map(d => ({ 
+          d: parse(d.date), 
+          v: +(d.engagement_rate || 0), // Utiliser engagement_rate au lieu de views
+          views: +(d.views || 0),       // Garder les vues pour l'info-bulle
+          likes: +(d.likes || 0),       // Garder les likes pour l'info-bulle
+          comments: +(d.comments || 0)  // Garder les commentaires pour l'info-bulle
+        })).filter(d => d.d)
       })).filter(s => s.pts.length);
+      
       if (!seriesParsed.length) return;
+      
       const allPts = seriesParsed.flatMap(s => s.pts);
       const x = d3.scaleUtc().domain(d3.extent(allPts, d => d.d)).range([0, innerW]);
+      
       if (Array.isArray(dates) && dates.length){
         const dmin = parse(dates[0]);
         const dmax = parse(dates[dates.length-1]);
         if (dmin && dmax) x.domain([dmin, dmax]);
       }
-      const y = d3.scaleSqrt().domain([0, d3.max(allPts, d => d.v)||1]).nice().range([innerH, 0]);
+      
+      // Utiliser une échelle linéaire pour le taux d'engagement (0-100%)
+      const y = d3.scaleLinear()
+        .domain([0, d3.max(allPts, d => d.v) || 10])
+        .nice()
+        .range([innerH, 0]);
+      
       const ax = d3.axisBottom(x).ticks(5).tickSizeOuter(0).tickFormat(d3.utcFormat('%d/%m/%Y'));
-      const ay = d3.axisLeft(y).ticks(4).tickSize(-innerW).tickFormat(d3.format('.2s'));
+      const ay = d3.axisLeft(y).ticks(4).tickSize(-innerW).tickFormat(d => d + '%'); // Ajouter le symbole %
+      
       gx.append('g').attr('transform', `translate(0,${innerH})`).call(ax).selectAll('text').attr('fill', '#9ca3af');
       gx.append('g').call(ay).call(g => g.selectAll('text').attr('fill', '#9ca3af')).call(g => g.selectAll('line').attr('stroke', '#1f2937')).call(g => g.select('.domain').attr('stroke', '#1f2937'));
       
@@ -574,7 +592,13 @@
             const formatViews = d3.format(',');
             chartTooltip
               .style('opacity', 1)
-              .html(`<strong>ID:</strong> ${s.videoId}<br/><strong>${videoTitle}</strong><br/>Date: ${formatDate(d.d)}<br/>Vues: ${formatViews(d.v)}`)
+              .html(`<strong>ID:</strong> ${s.videoId}<br/>
+                <strong>${videoTitle}</strong><br/>
+                Date: ${formatDate(d.d)}<br/>
+                Engagement Rate: ${formatViews(d.v)}%<br/>
+                Vues: ${formatViews(d.views)}<br/>
+                Likes: ${formatViews(d.likes)}<br/>
+                Comments: ${formatViews(d.comments)}`)
             positionChartTooltip(event.pageX, event.pageY);
           })
           .on('mousemove', function(event) {
@@ -654,20 +678,39 @@
       const gS = svgS.append('g').attr('transform', `translate(${m.l},${m.t})`);
       const innerW = w - m.l - m.r;
       const innerH = h - m.t - m.b;
+      
       const views = vids.map(v => +v.views || 0);
-      const likes = vids.map(v => +v.likes || 0);
+      const engagement = vids.map(v => +v.engagement_rate || 0);
+      
       const x = d3.scaleSqrt().domain([0, d3.max(views)||1]).nice().range([0, innerW]);
-      const y = d3.scaleSqrt().domain([0, d3.max(likes)||1]).nice().range([innerH, 0]);
+      const y = d3.scaleLinear().domain([0, d3.max(engagement)||1]).nice().range([innerH, 0]); // Utiliser engagement
+      
       const ax = d3.axisBottom(x).ticks(5).tickSizeOuter(0).tickFormat(d3.format('.2s'));
-      const ay = d3.axisLeft(y).ticks(5).tickSize(-innerW).tickFormat(d3.format('.2s'));
+      const ay = d3.axisLeft(y).ticks(5).tickSize(-innerW).tickFormat(d => d + '%'); // Formatter en pourcentage
+      
       gS.append('g').attr('transform', `translate(0,${innerH})`).call(ax).selectAll('text').attr('fill', '#9ca3af');
       gS.append('g').call(ay).call(g => g.selectAll('text').attr('fill', '#9ca3af')).call(g => g.selectAll('line').attr('stroke', '#1f2937')).call(g => g.select('.domain').attr('stroke', '#1f2937'));
+      
+      // Corriger les labels
       gS.append('text').attr('x', innerW).attr('y', innerH + 26).attr('text-anchor', 'end').attr('fill', '#9ca3af').attr('font-size', 11).text('Vues');
-      gS.append('text').attr('x', -10).attr('y', -6).attr('text-anchor', 'start').attr('fill', '#9ca3af').attr('font-size', 11).text('Likes');
+      gS.append('text').attr('x', -10).attr('y', -6).attr('text-anchor', 'start').attr('fill', '#9ca3af').attr('font-size', 11).text('Engagement (%)');
+      
       const tt = d3.select('body').append('div').attr('class', 'scatter-tooltip').style('position', 'absolute').style('background', '#1f2937').style('color', 'white').style('padding', '8px 12px').style('border-radius', '4px').style('font-size', '12px').style('pointer-events', 'none').style('opacity', 0).style('z-index', 1000);
       const fmt = d3.format(',');
-      const nodes = vids.map(v => ({ id: v.video_id, title: v.video_title || v.video_id, x: x(+v.views||0), y: y(+v.likes||0), views: +v.views||0, likes: +v.likes||0 }));
+      
+      // Corriger les nœuds pour utiliser engagement_rate
+      const nodes = vids.map(v => ({ 
+        id: v.video_id, 
+        title: v.video_title || v.video_id, 
+        x: x(+v.views||0), 
+        y: y(+v.engagement_rate||0), // Utiliser engagement_rate
+        views: +v.views||0, 
+        likes: +v.likes||0,
+        engagement: +v.engagement_rate||0 // Ajouter pour l'info-bulle
+      }));
+      
       const r = d3.scaleSqrt().domain([0, d3.max(views)||1]).range([2, 5]);
+      
       gS.selectAll('circle.pt').data(nodes).join('circle')
         .attr('class', 'pt')
         .attr('cx', d => d.x)
@@ -678,7 +721,8 @@
         .attr('stroke', 'none')
         .style('cursor', 'pointer')
         .on('mouseenter', function(ev, d){
-          tt.style('opacity', 1).html(`<strong>${d.title}</strong><br/>Vues: ${fmt(d.views)}<br/>Likes: ${fmt(d.likes)}`);
+          // Améliorer l'info-bulle
+          tt.style('opacity', 1).html(`<strong>${d.title}</strong><br/>Vues: ${fmt(d.views)}<br/>Likes: ${fmt(d.likes)}<br/>Engagement: ${d.engagement.toFixed(2)}%`);
         })
         .on('mousemove', function(ev){
           const padding = 12;
@@ -686,7 +730,6 @@
         })
         .on('mouseleave', function(){ tt.style('opacity', 0); })
         .on('click', async function(ev, d){
-          // Aligner avec le reste: appliquer la sélection vidéo comme dans la liste/ligne
           if (window && typeof window.highlightSelectedVideoRow === 'function') {
             selectedVideoId = d.id;
             selectedVideoData = (videosCache||[]).find(v => v.video_id === d.id) || { video_id: d.id, video_title: d.title };

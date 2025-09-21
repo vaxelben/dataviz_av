@@ -782,10 +782,10 @@ def api_videos_by_flow():
 
 @app.route("/api/video/views_timeline", methods=["GET"])
 def api_video_views_timeline():
-    """Série temporelle des vues par date pour un video_id.
+    """Série temporelle des vues, likes et commentaires par date pour un video_id.
 
     Paramètres: videoId (requis), table (défaut: yt_clean)
-    Réponse: { data: [{ date, views }], rowCount }
+    Réponse: { data: [{ date, views, likes, comments, engagement_rate }], rowCount }
     """
     db_path = Path(request.args.get("db") or DEFAULT_DB)
     table = request.args.get("table", "yt_clean")
@@ -814,7 +814,18 @@ def api_video_views_timeline():
     sql = f"""
         SELECT
           video_trending_date::VARCHAR AS d,
-          COALESCE(MAX(try_cast(regexp_replace(CAST(video_view_count AS VARCHAR), '[^0-9]', '') AS BIGINT)), 0) AS views
+          COALESCE(MAX(try_cast(regexp_replace(CAST(video_view_count AS VARCHAR), '[^0-9]', '') AS BIGINT)), 0) AS views,
+          COALESCE(MAX(try_cast(regexp_replace(CAST(video_like_count AS VARCHAR), '[^0-9]', '') AS BIGINT)), 0) AS likes,
+          COALESCE(MAX(try_cast(regexp_replace(CAST(video_comment_count AS VARCHAR), '[^0-9]', '') AS BIGINT)), 0) AS comments,
+          CASE 
+            WHEN COALESCE(MAX(try_cast(regexp_replace(CAST(video_view_count AS VARCHAR), '[^0-9]', '') AS BIGINT)), 0) > 0 
+            THEN ROUND(
+              (COALESCE(MAX(try_cast(regexp_replace(CAST(video_like_count AS VARCHAR), '[^0-9]', '') AS BIGINT)), 0) + 
+               COALESCE(MAX(try_cast(regexp_replace(CAST(video_comment_count AS VARCHAR), '[^0-9]', '') AS BIGINT)), 0)) * 100.0 
+              / COALESCE(MAX(try_cast(regexp_replace(CAST(video_view_count AS VARCHAR), '[^0-9]', '') AS BIGINT)), 1), 4
+            )
+            ELSE 0 
+          END AS engagement_rate
         FROM {table}
         WHERE {where_sql}
         GROUP BY 1
@@ -822,7 +833,16 @@ def api_video_views_timeline():
     """
     try:
         cols, rows, _, _ = run_select(db_path, sql, max_rows=100000)
-        data = [{"date": r[0], "views": int(r[1]) if r[1] is not None else 0} for r in rows]
+        data = [
+            {
+                "date": r[0], 
+                "views": int(r[1]) if r[1] is not None else 0,
+                "likes": int(r[2]) if r[2] is not None else 0, 
+                "comments": int(r[3]) if r[3] is not None else 0,
+                "engagement_rate": float(r[4]) if r[4] is not None else 0
+            } 
+            for r in rows
+        ]
         return jsonify({"data": data, "rowCount": len(data)})
     except Exception as e:
         return jsonify({"error": str(e)}), 400
