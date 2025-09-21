@@ -13,7 +13,7 @@ WITH base AS (
     video_definition::VARCHAR                AS video_definition,
     video_trending_country::VARCHAR          AS video_trending_country,
     channel_country::VARCHAR                 AS channel_country,
-    try_cast(video_category_id AS INTEGER)   AS video_category_id,
+    video_category_id::VARCHAR               AS video_category_id,
     try_cast(video_licensed_content AS BOOLEAN) AS video_licensed_content,
     try_cast(video_view_count AS BIGINT)         AS video_view_count,
     try_cast(video_like_count AS BIGINT)         AS video_like_count,
@@ -78,3 +78,30 @@ SELECT
     ELSE NULL
   END AS video_duration_seconds
 FROM base;
+
+-- ============================================================
+-- TABLE DES TAGS DÉNORMALISÉE
+-- ============================================================
+
+-- Créer une fonction pour splitter les tags
+CREATE OR REPLACE MACRO split_tags(tag_string) AS 
+    string_split(LOWER(TRIM(tag_string)), ',');
+
+-- Table tags_videos (une ligne par tag)
+CREATE OR REPLACE TABLE video_tags AS
+WITH tags_split AS (
+    SELECT 
+        video_id,
+        video_trending_date,
+        UNNEST(split_tags(video_tags)) AS tag,
+        ROW_NUMBER() OVER (PARTITION BY video_id, video_trending_date ORDER BY 1) AS tag_position
+    FROM yt_clean
+    WHERE video_tags IS NOT NULL AND video_tags != ''
+)
+SELECT 
+    TRIM(tag) AS tag,
+    video_id,
+    video_trending_date,
+FROM tags_split
+WHERE LENGTH(TRIM(tag)) > 1
+  AND TRIM(tag) NOT LIKE '%?%';
