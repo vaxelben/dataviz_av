@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Flux pays (channel_country → trending_country)</title>
   <style>
-    :root { --bg:#0f172a; --panel:#0b1220; --text:#e5e7eb; --muted:#343638; --border:#1f2937; }
+    :root { --bg:#0f0f0f; --panel:#0b1220; --text:#e5e7eb; --muted:#0f0f0f; --border:#1f2937; }
     *{box-sizing:border-box}
     html, body { height:100%; }
     body{margin:0;background:var(--bg);color:var(--text);font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial; overflow:hidden}
@@ -31,12 +31,12 @@
     /* Pas de surbrillance pour le bouton pin/unpin */
     .btn-pin.is-on{ outline:none; }
     label{display:block;margin-bottom:8px;color:var(--muted);font-size:13px}
-    select,input{width:100%;padding:8px 10px;background:#0f172a;border:1px solid var(--border);border-radius:8px;color:var(--text)}
+    select,input{width:100%;padding:8px 10px;background:#0f0f0f;border:1px solid var(--border);border-radius:8px;color:var(--text)}
     .tooltip{position:fixed;pointer-events:none;background:#111827;border:1px solid var(--border);padding:8px 10px;border-radius:8px;font-size:12px;color:var(--text);display:none}
-    .country{ transition: fill .18s ease, stroke .18s ease, stroke-width .18s ease; fill:#000000; stroke:#343638; stroke-width:0.5; }
+    .country{ transition: fill .18s ease, stroke .18s ease, stroke-width .18s ease; fill:#000000; stroke:#0f0f0f; stroke-width:0.5; }
     .country.hl{ fill:#000000; stroke:#ffffff; stroke-width:1.0; }
     .country.sel{ fill:#000000; stroke:#ffffff; stroke-width:1.0; }
-    .country.dst{ fill:#000000; stroke:#343638; stroke-width:0.5; }
+    .country.dst{ fill:#000000; stroke:#0f0f0f; stroke-width:0.5; }
     /* Icône de lien bleu clair par défaut, plus bleue au survol */
     .link-icon{ filter: hue-rotate(200deg) saturate(180%) brightness(1.0); opacity: .9; transition: filter .15s ease, opacity .15s ease; }
     a:hover .link-icon{ filter: hue-rotate(200deg) saturate(280%) brightness(1.08); opacity: 1; }
@@ -302,6 +302,198 @@
         isPreloading = false;
       }, delay);
     }
+
+    async function fetchVideoTags(){
+      const qs = new URLSearchParams();
+      if(dates.length){
+        const idx = +dateSlider.value || 0;
+        const onDate = dates[Math.max(0, Math.min(idx, dates.length-1))];
+        if(onDate) qs.set('onDate', onDate);
+      }
+      const selected = srcSelect.value;
+      if(selected){ qs.set('src', selected); }
+      if(mode){ qs.set('mode', mode); }
+      const res = await fetch(`/api/video/tags?${qs.toString()}`);
+      const js = await res.json();
+      if(!res.ok) throw new Error(js.error||'Erreur API tags');
+      return js.data || [];
+    }
+
+    function renderWordCloud(videoList){
+      const chart2Div = document.getElementById('chart2');
+      if (!chart2Div) return;
+      chart2Div.replaceChildren();
+      d3.selectAll('.wordcloud-tooltip').remove();
+      
+      // Charger les tags de manière asynchrone
+      (async () => {
+        try {
+          const tags = await fetchVideoTags();
+          if (!tags.length) {
+            // Afficher un message si pas de tags
+            const message = document.createElement('div');
+            message.style.cssText = 'display:flex;align-items:center;justify-content:center;height:100%;color:#9ca3af;font-size:14px;';
+            message.textContent = 'Aucun tag disponible pour cette sélection';
+            chart2Div.appendChild(message);
+            return;
+          }
+          
+          const m = { t:20, r:16, b:20, l:16 };
+          const w = chart2Div.clientWidth || Math.max(360, Math.floor(width/2));
+          const h = chart2Div.clientHeight || 320;
+          const svgW = d3.select(chart2Div).append('svg')
+            .attr('width', '100%')
+            .attr('height', '100%')
+            .attr('viewBox', `0 0 ${w} ${h}`);
+          const gW = svgW.append('g').attr('transform', `translate(${w/2},${h/2})`);
+          
+          const innerW = w - m.l - m.r;
+          const innerH = h - m.t - m.b;
+          
+          // Échelles pour la taille et la couleur
+          const maxCount = d3.max(tags, d => d.count) || 1;
+          const minCount = d3.min(tags, d => d.count) || 1;
+          
+          const sizeScale = d3.scaleLog()
+            .domain([minCount, maxCount])
+            .range([8, Math.min(innerW, innerH) * 0.15]); // Taille adaptative
+          
+          // Algorithme de placement simplifié (spirale)
+          const placedWords = [];
+          const centerX = 0, centerY = 0;
+          
+          // Fonction pour vérifier les collisions
+          function checkCollision(x, y, width, height) {
+            return placedWords.some(word => {
+              const dx = Math.abs(x - word.x);
+              const dy = Math.abs(y - word.y);
+              return dx < (width + word.width) / 2 && dy < (height + word.height) / 2;
+            });
+          }
+          
+          // Fonction pour placer un mot en spirale
+          function placeWord(word, fontSize) {
+            const textWidth = word.tag.length * fontSize * 0.6; // Estimation de la largeur
+            const textHeight = fontSize;
+            
+            // Essayer le centre d'abord
+            if (!checkCollision(centerX, centerY, textWidth, textHeight)) {
+              return { x: centerX, y: centerY, width: textWidth, height: textHeight };
+            }
+            
+            // Spirale pour trouver une place
+            let radius = fontSize;
+            let angle = 0;
+            const angleStep = 0.5;
+            const radiusStep = 5;
+            
+            while (radius < Math.min(innerW, innerH) / 2) {
+              const x = centerX + radius * Math.cos(angle);
+              const y = centerY + radius * Math.sin(angle);
+              
+              if (Math.abs(x) < innerW/2 - textWidth/2 && 
+                  Math.abs(y) < innerH/2 - textHeight/2 &&
+                  !checkCollision(x, y, textWidth, textHeight)) {
+                return { x, y, width: textWidth, height: textHeight };
+              }
+              
+              angle += angleStep;
+              if (angle > 2 * Math.PI) {
+                angle = 0;
+                radius += radiusStep;
+              }
+            }
+            
+            return null; // Impossible à placer
+          }
+          
+          // Créer l'info-bulle
+          const tooltip = d3.select('body').append('div')
+            .attr('class', 'wordcloud-tooltip')
+            .style('position', 'absolute')
+            .style('background', '#1f2937')
+            .style('color', 'white')
+            .style('padding', '6px 10px')
+            .style('border-radius', '4px')
+            .style('font-size', '12px')
+            .style('pointer-events', 'none')
+            .style('opacity', 0)
+            .style('z-index', 1000);
+          
+          // Trier les tags par count décroissant pour placer les plus importants en premier
+          const sortedTags = tags.slice(0, 50).sort((a, b) => b.count - a.count);
+          
+          // Placer et dessiner les mots
+          sortedTags.forEach(tagData => {
+            const fontSize = sizeScale(tagData.count);
+            const position = placeWord(tagData, fontSize);
+            
+            if (position) {
+              placedWords.push({
+                tag: tagData.tag,
+                count: tagData.count,
+                x: position.x,
+                y: position.y,
+                width: position.width,
+                height: position.height
+              });
+              
+              gW.append('text')
+                .attr('class', 'word-cloud-text')
+                .attr('x', position.x)
+                .attr('y', position.y)
+                .attr('text-anchor', 'middle')
+                .attr('dominant-baseline', 'middle')
+                .attr('font-size', fontSize)
+                .attr('font-family', 'Arial, sans-serif')
+                .attr('font-weight', tagData.count > maxCount * 0.7 ? 'bold' : 'normal')
+                .attr('fill', '#22c55e')
+                .attr('opacity', 0.8)
+                .style('cursor', 'pointer')
+                .text(tagData.tag)
+                .on('mouseenter', function(event) {
+                  d3.select(this).attr('opacity', 1).attr('stroke', '#fff').attr('stroke-width', 0.5);
+                  tooltip
+                    .style('opacity', 1)
+                    .html(`<strong>${tagData.tag}</strong><br/>Fréquence: ${tagData.count}`)
+                    .style('left', (event.pageX + 10) + 'px')
+                    .style('top', (event.pageY - 10) + 'px');
+                })
+                .on('mousemove', function(event) {
+                  tooltip
+                    .style('left', (event.pageX + 10) + 'px')
+                    .style('top', (event.pageY - 10) + 'px');
+                })
+                .on('mouseleave', function() {
+                  d3.select(this).attr('opacity', 0.8).attr('stroke', 'none');
+                  tooltip.style('opacity', 0);
+                })
+                .on('click', function() {
+                  // Optionnel: action au clic sur un tag
+                  console.log('Tag cliqué:', tagData.tag);
+                });
+            }
+          });
+          
+          // Ajouter un titre
+          svgW.append('text')
+            .attr('x', w/2)
+            .attr('y', 15)
+            .attr('text-anchor', 'middle')
+            .attr('font-size', '12px')
+            .attr('fill', '#9ca3af')
+            .text('Tags des vidéos');
+            
+        } catch (error) {
+          console.warn('Erreur lors du chargement des tags:', error);
+          const message = document.createElement('div');
+          message.style.cssText = 'display:flex;align-items:center;justify-content:center;height:100%;color:#ef4444;font-size:14px;';
+          message.textContent = 'Erreur lors du chargement des tags';
+          chart2Div.appendChild(message);
+        }
+      })();
+    }
+    window.renderWordCloud = renderWordCloud;
 
     function renderViewsChartMulti(seriesList, highlightVideoId = null){
       chartDiv.replaceChildren();
@@ -664,86 +856,6 @@
       }
     }
 
-    function renderScatterChart(videoList){
-      const chart2Div = document.getElementById('chart2');
-      if (!chart2Div) return;
-      chart2Div.replaceChildren();
-      d3.selectAll('.scatter-tooltip').remove();
-      const vids = Array.isArray(videoList) ? videoList : [];
-      if (!vids.length) return;
-      const m = { t:20, r:16, b:32, l:44 };
-      const w = chart2Div.clientWidth || Math.max(360, Math.floor(width/2));
-      const h = chart2Div.clientHeight || 320;
-      const svgS = d3.select(chart2Div).append('svg').attr('width', '100%').attr('height', '100%').attr('viewBox', `0 0 ${w} ${h}`);
-      const gS = svgS.append('g').attr('transform', `translate(${m.l},${m.t})`);
-      const innerW = w - m.l - m.r;
-      const innerH = h - m.t - m.b;
-      
-      const views = vids.map(v => +v.views || 0);
-      const engagement = vids.map(v => +v.engagement_rate || 0);
-      
-      const x = d3.scaleSqrt().domain([0, d3.max(views)||1]).nice().range([0, innerW]);
-      const y = d3.scaleLinear().domain([0, d3.max(engagement)||1]).nice().range([innerH, 0]); // Utiliser engagement
-      
-      const ax = d3.axisBottom(x).ticks(5).tickSizeOuter(0).tickFormat(d3.format('.2s'));
-      const ay = d3.axisLeft(y).ticks(5).tickSize(-innerW).tickFormat(d => d + '%'); // Formatter en pourcentage
-      
-      gS.append('g').attr('transform', `translate(0,${innerH})`).call(ax).selectAll('text').attr('fill', '#9ca3af');
-      gS.append('g').call(ay).call(g => g.selectAll('text').attr('fill', '#9ca3af')).call(g => g.selectAll('line').attr('stroke', '#1f2937')).call(g => g.select('.domain').attr('stroke', '#1f2937'));
-      
-      // Corriger les labels
-      gS.append('text').attr('x', innerW).attr('y', innerH + 26).attr('text-anchor', 'end').attr('fill', '#9ca3af').attr('font-size', 11).text('Vues');
-      gS.append('text').attr('x', -10).attr('y', -6).attr('text-anchor', 'start').attr('fill', '#9ca3af').attr('font-size', 11).text('Engagement (%)');
-      
-      const tt = d3.select('body').append('div').attr('class', 'scatter-tooltip').style('position', 'absolute').style('background', '#1f2937').style('color', 'white').style('padding', '8px 12px').style('border-radius', '4px').style('font-size', '12px').style('pointer-events', 'none').style('opacity', 0).style('z-index', 1000);
-      const fmt = d3.format(',');
-      
-      // Corriger les nœuds pour utiliser engagement_rate
-      const nodes = vids.map(v => ({ 
-        id: v.video_id, 
-        title: v.video_title || v.video_id, 
-        x: x(+v.views||0), 
-        y: y(+v.engagement_rate||0), // Utiliser engagement_rate
-        views: +v.views||0, 
-        likes: +v.likes||0,
-        engagement: +v.engagement_rate||0 // Ajouter pour l'info-bulle
-      }));
-      
-      const r = d3.scaleSqrt().domain([0, d3.max(views)||1]).range([2, 5]);
-      
-      gS.selectAll('circle.pt').data(nodes).join('circle')
-        .attr('class', 'pt')
-        .attr('cx', d => d.x)
-        .attr('cy', d => d.y)
-        .attr('r', d => r(d.views))
-        .attr('fill', '#22c55e')
-        .attr('fill-opacity', 0.8)
-        .attr('stroke', 'none')
-        .style('cursor', 'pointer')
-        .on('mouseenter', function(ev, d){
-          // Améliorer l'info-bulle
-          tt.style('opacity', 1).html(`<strong>${d.title}</strong><br/>Vues: ${fmt(d.views)}<br/>Likes: ${fmt(d.likes)}<br/>Engagement: ${d.engagement.toFixed(2)}%`);
-        })
-        .on('mousemove', function(ev){
-          const padding = 12;
-          tt.style('left', (ev.pageX + padding) + 'px').style('top', (ev.pageY + padding) + 'px');
-        })
-        .on('mouseleave', function(){ tt.style('opacity', 0); })
-        .on('click', async function(ev, d){
-          if (window && typeof window.highlightSelectedVideoRow === 'function') {
-            selectedVideoId = d.id;
-            selectedVideoData = (videosCache||[]).find(v => v.video_id === d.id) || { video_id: d.id, video_title: d.title };
-            renderVideoList([selectedVideoData]);
-            highlightSelectedVideoRow();
-            if (window.refreshMapOnly) await window.refreshMapOnly();
-            const tl = await fetchVideoViewsTimeline(d.id);
-            renderViewsChartMulti([{ videoId: d.id, data: tl }], d.id);
-            renderScatterChart([selectedVideoData]);
-          }
-        });
-    }
-    window.renderScatterChart = renderScatterChart;
-
     function setChartHighlightMany(videoIds){
       const ids = Array.isArray(videoIds) ? new Set(videoIds) : null;
       const svgC = d3.select(chartDiv).select('svg');
@@ -1089,7 +1201,7 @@
       // Sphère (océan) - pas de graticule
       g.append('path')
         .datum({type:'Sphere'})
-        .attr('fill', '#343638')
+        .attr('fill', '#0f0f0f')
         .attr('stroke', 'none')
         .attr('d', path);
       g.selectAll('path.country').data(geo.features).join('path')
@@ -1357,7 +1469,7 @@
 
       targetG.append('path')
         .datum({type:'Sphere'})
-        .attr('fill', '#343638')
+        .attr('fill', '#0f0f0f')
         .attr('stroke', 'none')
         .attr('d', pth);
       targetG.selectAll('path.country').data(geo.features).join('path')
@@ -1463,7 +1575,7 @@
       try {
         const series = await fetchTimelinesForVideos(videosCache, 20);
         renderViewsChartMulti(series, null);
-        renderScatterChart(videosCache);
+        renderWordCloud(videosCache);
       } catch (e) {
         // silencieux
       }
@@ -1775,12 +1887,12 @@
         if (selectedVideoId && chartFollowSelection !== false){
           const tl = await fetchVideoViewsTimeline(selectedVideoId);
           renderViewsChartMulti([{ videoId: selectedVideoId, data: tl }], selectedVideoId);
-          renderScatterChart(videosCache);
+          renderWordCloud(videosCache);
         } else {
           // Charger progressivement plus de timelines
           const series = await loadMoreTimelines(videosCache, 15);
           renderViewsChartMulti(series, null);
-          renderScatterChart(videosCache);
+          renderWordCloud(videosCache);
           // Précharger plus de timelines en arrière-plan
           preloadTimelines(videosCache, 300);
         }
@@ -1894,7 +2006,7 @@
               if (window.refreshMapOnly) await window.refreshMapOnly();
               const series = await fetchTimelinesForVideos(fullVideos, 20);
               renderViewsChartMulti(series, null);
-              renderScatterChart(fullVideos);
+              renderWordCloud(fullVideos);
             } else {
               // Sélectionner => filtrer la liste pour cette vidéo uniquement
               selectedVideoId = v.video_id; selectedVideoData = v;
@@ -1904,7 +2016,7 @@
               if (window.refreshMapOnly) await window.refreshMapOnly();
               const timeline = await fetchVideoViewsTimeline(selectedVideoId);
               renderViewsChartMulti([{ videoId: selectedVideoId, data: timeline }], selectedVideoId);
-              renderScatterChart([v]);
+              renderWordCloud([v]);
             }
           });
           return row;
@@ -1957,7 +2069,7 @@
           // Recharger les timelines pour les vidéos de cette date spécifique
           const series = await loadMoreTimelines(videosCache, 15);
           renderViewsChartMulti(series, null);
-          renderScatterChart(videosCache);
+          renderWordCloud(videosCache);
         }, 50); // Débounce de 50ms pour une réactivité optimale
       });
       srcSelect.addEventListener('change', () => {

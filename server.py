@@ -847,7 +847,79 @@ def api_video_views_timeline():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
+@app.route("/api/video/tags", methods=["GET"])
+def api_video_tags():
+    """Retourne les tags des vidéos filtrées par date et channel_country.
 
+    Paramètres: onDate=YYYY-MM-DD (optionnel), src=channel_country (optionnel), mode (on/off), table (défaut: yt_clean)
+    Réponse: { data: [{ tag, count }], rowCount }
+    """
+    db_path = Path(request.args.get("db") or DEFAULT_DB)
+    table_main = request.args.get("table", "yt_clean")
+    table_tags = "video_tags"  # Table des tags
+    
+    try:
+        table_main = validate_identifier(table_main)
+        table_tags = validate_identifier(table_tags)
+    except Exception as e:
+        return jsonify({"error": f"Nom de table invalide: {e}"}), 400
+
+    if not db_path.exists():
+        return jsonify({"error": f"Base DuckDB introuvable: {db_path}"}), 400
+
+    try:
+        on_date = validate_yyyy_mm_dd(request.args.get("onDate"))
+    except Exception as e:
+        return jsonify({"error": f"Paramètre onDate invalide: {e}"}), 400
+
+    src = (request.args.get("src") or "").strip()
+    mode = (request.args.get("mode") or "").strip().lower()
+
+    # Construction des filtres pour la table principale
+    where_parts = ["1=1"]
+    if on_date:
+        where_parts.append(f"m.video_trending_date = DATE '{on_date}'")
+    if src:
+        esc_src = src.replace("'", "''").lower()
+        where_parts.append(f"lower(m.channel_country) = '{esc_src}'")
+    if mode in ("on", "international"):
+        where_parts.append("lower(trim(m.channel_country)) <> lower(trim(m.video_trending_country))")
+    elif mode in ("off", "domestic", ""):
+        where_parts.append("lower(trim(m.channel_country)) = lower(trim(m.video_trending_country))")
+    
+    where_sql = " AND ".join(where_parts)
+
+    # Jointure avec la table des tags et agrégation
+    sql = f"""
+        SELECT 
+          t.tag,
+          COUNT(*) AS tag_count
+        FROM {table_tags} t
+        INNER JOIN {table_main} m ON t.video_id = m.video_id 
+          AND t.video_trending_date = m.video_trending_date
+        WHERE {where_sql}
+          AND t.tag IS NOT NULL 
+          AND length(trim(t.tag)) > 0
+        GROUP BY t.tag
+        HAVING COUNT(*) >= 2  -- Minimum 2 occurrences pour éviter le bruit
+        ORDER BY tag_count DESC
+        LIMIT 100  -- Limiter à 100 tags les plus fréquents
+    """
+    
+    try:
+        cols, rows, _, _ = run_select(db_path, sql, max_rows=200)
+        data = [
+            {
+                "tag": r[0],
+                "count": int(r[1]) if r[1] is not None else 0
+            }
+            for r in rows if r[0]  # Filtrer les tags vides
+        ]
+        return jsonify({"data": data, "rowCount": len(data)})
+    except Exception as e:
+        # Fallback en cas d'erreur (table tags inexistante, etc.)
+        return jsonify({"data": [], "rowCount": 0, "error": str(e)})
+        
 def main() -> None:
     host = os.getenv("HOST", "127.0.0.1")
     port = int(os.getenv("PORT", "8000"))
